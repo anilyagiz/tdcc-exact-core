@@ -1,7 +1,7 @@
 [project]
-name = "opentpu"
+name = "tdcc-exact-core"
 version = "0.1.0"
-description = "openTPU: thin LLM inference accelerator -- SystemVerilog RTL, ISA simulator, Triton-style language and compiler"
+description = "TDCC Exact Core: an auditable AI accelerator (built on openTPU) whose every answer anyone can re-check"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = ["numpy", "textual"]
@@ -11,6 +11,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [project.scripts]
+tdcc-exact = "tdcc_exact.cli:main"
 otpu-lens = "opentpu.host.hwlens:main"
 otpu-smi = "opentpu.host.smi:main"
 otpu-lock = "opentpu.host.runstate:hold_main"
@@ -22,7 +23,7 @@ otpu-i2c = "opentpu.host.i2c:main"
 otpu-memcal = "opentpu.host.memcal:main"
 
 [tool.setuptools.packages.find]
-include = ["opentpu*"]
+include = ["opentpu*", "tdcc_exact*"]
 
 [tool.setuptools.package-data]
 opentpu = ["lens_app.html", "host/setup_pcie.sh", "host/pcie/*", "host/litedram/*"]

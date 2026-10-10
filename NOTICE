@@ -1,0 +1,9 @@
+TDCC Exact Core
+Copyright 2026 The Decentralized Compute Company
+
+This product is a modified version of openTPU (https://github.com/FeSens/openTPU),
+licensed under the Apache License, Version 2.0.
+
+Changes from openTPU: the tdcc_exact package (trace log, oracle jobs, receipts, dispute,
+settlement and the tdcc-exact command), an observer hook in opentpu/isasim.py's
+Machine.run, tests/test_exact.py, docs/exact.md, and the README and package metadata.

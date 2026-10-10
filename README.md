@@ -1,10 +1,83 @@
-# openTPU
+# TDCC Exact Core
 
-**An open-source AI accelerator, developed by AI.**
+**An AI chip whose every answer anyone can re-check, and a Solana market to rent it.**
 
-openTPU brings the lessons of [auto-arch-tournament](https://github.com/FeSens/auto-arch-tournament)
-to AI accelerators. It asks two questions: how far can AI agents go at hardware design, and can
-they build the chip that runs their own inference?
+Exact Core is the accelerator behind TDCC Exact, from The Decentralized Compute Company. It is
+built on [openTPU](https://github.com/FeSens/openTPU), an open-source accelerator whose card
+gives the same bits as its simulator, and adds what an auditable chip needs: a trace log of
+every instruction, a fingerprint a provider posts with each answer, and a dispute that names
+the first instruction a dishonest run got wrong.
+
+| Block | What it does |
+|:--|:--|
+| Matrix unit | the heavy LLM math in 8-bit numbers, in a fixed order |
+| Vector unit | softmax and norms with fixed rounding, so the bits never drift |
+| Trace log | records every step, so a dispute points to the one step that differs |
+| Sequencer + DMA | one instruction per cycle; every data movement is an instruction |
+
+It runs on a Kintex-7 FPGA PCIe card (Inspur YPCB-00338). **Honest status:** the Exact layer
+(trace log, fingerprint, dispute) runs on the bit-exact simulator today; the trace log in
+hardware and its speed on the card are not built or measured yet.
+
+## How TDCC Exact works
+
+1. **Rent.** A renter opens a job on Solana; the USDC waits in escrow.
+2. **Run.** A provider runs it on Exact Core and posts the answer's fingerprint.
+3. **Check.** Any verifier re-runs it on a laptop. A mismatch opens a challenge.
+4. **Settle.** Honest providers get paid (80% host, 20% TDCC). A cheater loses its stake: the
+   renter is refunded and the verifier takes a share.
+
+Compute runs off-chain. Money, proof and penalties live on Solana (the program is not in this
+repository; `tdcc_exact/settle.py` computes the transfers it executes).
+
+## Try the demo
+
+Runs on a laptop, no card, in about 10 seconds on the built-in tiny model:
+
+```sh
+pip install -e .
+tdcc-exact demo
+```
+
+```
+1. renter opens a yes/no oracle job on tiny, locks 2.00 USDC
+2. provider A runs it honestly; provider B skips layer 1 to save time
+   A: NO  2df44a94...
+   B: YES bc1f7c5e...  (667 matrix multiplies skipped)
+3. a verifier re-runs the job on this laptop
+   A: match -> accept
+   B: MISMATCH -> challenge
+4. searching B's trace for the first instruction that went wrong
+   bisection: checkpoint 1 of 26 differs (5 rounds), steps 423..844
+   first fault: step 634, slice 0, pc 12 (state)
+     MM ... ; mm 1x256 . 128x256^T
+5. settlement (the Solana program executes these transfers)
+```
+
+On LFM2.5-230M, the model in the hackathon demo (needs `transformers` for its tokenizer):
+
+```sh
+hf download LiquidAI/LFM2.5-230M --local-dir models/LFM2.5-230M
+tdcc-exact demo --model models/LFM2.5-230M --question "Did it rain in Paris on 1 October 2026?"
+```
+
+Step by step, as the market runs it:
+
+```sh
+tdcc-exact job new --model tiny --question "Will it rain tomorrow?" --id j1 --out job.json
+tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json
+tdcc-exact run --job job.json --provider B --skip-layer 1 --out b.json --trace b.trace.json
+tdcc-exact verify --job job.json --receipt a.json      # ACCEPT, exit 0
+tdcc-exact verify --job job.json --receipt b.json      # CHALLENGE, exit 1
+tdcc-exact dispute --job job.json --trace b.trace.json --replay-skip-layer 1
+```
+
+[docs/exact.md](docs/exact.md) describes the trace log, the fingerprint and the dispute.
+
+---
+
+*Everything below is the openTPU design Exact Core builds on, as upstream documents it. The
+`otpu-*` commands and the `opentpu` package keep their names, so upstream's changes merge in.*
 
 ![otpu-chat on LFM2.5-230M with otpu-smi watching the card](docs/img/card-chat-smi.gif)
 
@@ -316,4 +389,5 @@ and performance claims should say how they were measured.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE): Exact Core is a modified
+version of openTPU by FeSens.

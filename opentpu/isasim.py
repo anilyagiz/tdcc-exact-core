@@ -686,6 +686,8 @@ class Machine:
         self.args = args
         self.chains = 0                  # HALT CHAIN restarts so far
         self.host = None                 # WAITW's host: host(machine) when every slice waits
+        self.observer = None             # observer(slice, pc): after each instruction it steps
+                                         # (TDCC Exact's trace log, tdcc_exact/trace.py)
         for s in self.slices:
             s.R = _regs(args)
 
@@ -718,7 +720,10 @@ class Machine:
             progressed = False
             for s in self.slices:
                 while not s.halted and s.waiting is None and s.polling is None:
+                    pc = s.pc
                     s.step()
+                    if self.observer is not None:
+                        self.observer(s, pc)
                     steps += 1
                     progressed = True
                     if steps > max_steps:

@@ -1,0 +1,142 @@
+"""The trace log: a commitment to every instruction a run executes, cheap enough to keep on.
+
+Every instruction the simulator steps extends a hash chain:
+
+    chain[i] = H(chain[i-1] || slice || pc || the instruction's 8 words || R0..R15 after it)
+
+and every `every` steps, and at the end of each device run, the log takes a checkpoint: the
+chain so far and a hash of each slice's working state (TMEM, ACT RAM and its scales, the
+registers, the pc). A checkpoint's leaf is H(step || chain || state). The leaves' Merkle root
+is the trace root a provider posts with its answer.
+
+The host's writes into DRAM between runs (the token, its embedding row) and the start of each
+run (its arguments) go into the chain too, so the log covers the inputs as well as the work.
+
+Two honest runs of the same job give the same leaves. Once a run goes wrong its chain differs
+from that step on (the chain is cumulative), so the first differing leaf can be found by a
+binary search, and inside its window a replay with a state hash per step names the first
+instruction whose result differs (tdcc_exact/dispute.py).
+"""
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field
+
+import numpy as np
+
+
+DIGEST = 16                      # bytes per hash (blake2b-128)
+EVERY = 4096                     # steps between checkpoints
+
+
+def h(*parts: bytes) -> bytes:
+    m = hashlib.blake2b(digest_size=DIGEST)
+    for p in parts:
+        m.update(p)
+    return m.digest()
+
+
+def state_hash(s) -> bytes:
+    """One slice's working state: TMEM, ACT RAM and its scales, the registers and the pc
+    (DRAM is not hashed: what a run stores there it stores from TMEM, and what it loads
+    back lands in TMEM, so a wrong value shows up here first)."""
+    regs = np.asarray([s.pc & 0xFFFFFFFF] + [r & 0xFFFFFFFF for r in s.R], np.uint32)
+    return h(s.tmem.tobytes(), s.act.tobytes(), s.ascale.tobytes(), regs.tobytes())
+
+
+def merkle_root(leaves: list[bytes]) -> bytes:
+    if not leaves:
+        return h(b"empty")
+    level = [h(b"\x00", x) for x in leaves]
+    while len(level) > 1:
+        if len(level) % 2:
+            level.append(level[-1])
+        level = [h(b"\x01", level[i], level[i + 1]) for i in range(0, len(level), 2)]
+    return level[0]
+
+
+@dataclass
+class Checkpoint:
+    step: int                    # steps so far (the instruction count across runs and slices)
+    chain: bytes
+    state: bytes
+
+    @property
+    def leaf(self) -> bytes:
+        return h(self.step.to_bytes(8, "little"), self.chain, self.state)
+
+    def to_json(self) -> list:
+        return [self.step, self.chain.hex(), self.state.hex()]
+
+    @staticmethod
+    def from_json(v) -> "Checkpoint":
+        return Checkpoint(int(v[0]), bytes.fromhex(v[1]), bytes.fromhex(v[2]))
+
+
+@dataclass
+class StepRecord:
+    """One step inside a disputed window: where it ran and what it left behind."""
+    step: int
+    slice: int
+    pc: int
+    words: str                   # the instruction's encoding (what the chain hashed)
+    instr: str                   # and as text, for people (its comment may differ by compile)
+    chain: str
+    state: str
+
+
+@dataclass
+class TraceLog:
+    every: int = EVERY
+    window: tuple[int, int] | None = None     # (lo, hi]: record each step's state here
+    step: int = 0
+    chain: bytes = field(default_factory=lambda: h(b"tdcc-exact/trace/v1"))
+    checkpoints: list[Checkpoint] = field(default_factory=list)
+    records: list[StepRecord] = field(default_factory=list)
+    _words: dict = field(default_factory=dict)    # id(program) -> (program, encoded words)
+
+    # ------------------------------------------------------------- the machine's events
+    def observe(self, s, pc: int, slices) -> None:
+        """After slice s stepped the instruction at pc (isasim.Machine.observer); slices: all
+        of the machine's, for the checkpoints."""
+        prog = s.prog
+        ent = self._words.get(id(prog))
+        if ent is None or ent[0] is not prog:
+            ent = (prog, [None] * len(prog))
+            self._words[id(prog)] = ent
+        words = ent[1][pc]
+        if words is None:
+            words = ent[1][pc] = np.asarray(prog[pc].encode(), np.uint32).tobytes()
+        regs = np.asarray([r & 0xFFFFFFFF for r in s.R], np.uint32).tobytes()
+        self.step += 1
+        self.chain = h(self.chain, s.sid.to_bytes(2, "little"), pc.to_bytes(4, "little"),
+                       words, regs)
+        if self.window is not None and self.window[0] < self.step <= self.window[1]:
+            self.records.append(StepRecord(self.step, s.sid, pc, words.hex(), str(prog[pc]),
+                                           self.chain.hex(), state_hash(s).hex()))
+        if self.step % self.every == 0:
+            self.checkpoint(slices)
+
+    def host_write(self, s: int, addr: int, data: bytes) -> None:
+        self.chain = h(self.chain, b"W", s.to_bytes(2, "little"), addr.to_bytes(8, "little"),
+                       h(data))
+
+    def run_start(self, args) -> None:
+        a = np.asarray([0] if args is None else [int(x) & 0xFFFFFFFF for x in args], np.uint32)
+        self.chain = h(self.chain, b"R", a.tobytes())
+
+    def checkpoint(self, slices) -> None:
+        if self.checkpoints and self.checkpoints[-1].step == self.step:
+            return
+        st = h(*[state_hash(s) for s in slices])
+        self.chain = h(self.chain, b"C", st)     # (so a difference in state stays in the chain)
+        self.checkpoints.append(Checkpoint(self.step, self.chain, st))
+
+    # ------------------------------------------------------------- the commitment
+    @property
+    def root(self) -> bytes:
+        return merkle_root([c.leaf for c in self.checkpoints])
+
+    def to_json(self) -> dict:
+        return {"every": self.every, "steps": self.step, "root": self.root.hex(),
+                "checkpoints": [c.to_json() for c in self.checkpoints]}
