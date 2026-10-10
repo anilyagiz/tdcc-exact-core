@@ -4,7 +4,7 @@
     tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json
     tdcc-exact verify --job job.json --receipt a.json
     tdcc-exact dispute --job job.json --trace b.trace.json [--replay-skip-layer K]
-    tdcc-exact demo [--model models/LFM2.5-230M]
+    tdcc-exact demo [--model models/LFM2.5-230M] [--devnet | --localnet]
     tdcc-exact registry add --model tiny [--wformat int8 --cap 256]
 """
 from __future__ import annotations
@@ -114,6 +114,9 @@ def cmd_dispute(a) -> int:
 
 
 def cmd_demo(a) -> int:
+    if a.devnet or a.localnet:
+        from .chain_demo import run
+        return run(a)
     t0 = time.time()
 
     def say(*x):
@@ -214,6 +217,14 @@ def main(argv=None) -> int:
     m.add_argument("--stake", type=int, default=50_000_000, help="USDC base units")
     m.add_argument("--every", type=int, default=EVERY)
     m.add_argument("--out", help="write the run's JSON here")
+    m.add_argument("--devnet", action="store_true",
+                   help="every step a Solana devnet transaction (pip install -e '.[chain]')")
+    m.add_argument("--localnet", action="store_true", help="the same on solana-test-validator")
+    m.add_argument("--rpc", help="RPC URL (default: the cluster's public one)")
+    m.add_argument("--commit-window", type=int, default=100,
+                   help="slots, for a market this run creates (the providers' run time)")
+    m.add_argument("--challenge-window", type=int, default=60,
+                   help="slots, for a market this run creates (the verifier's run time)")
     m.set_defaults(fn=cmd_demo)
 
     a = p.parse_args(argv)

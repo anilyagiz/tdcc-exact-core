@@ -6,6 +6,10 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = ["numpy", "textual"]
 
+[project.optional-dependencies]
+chain = ["solders>=0.21"]
+model = ["transformers", "huggingface_hub"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

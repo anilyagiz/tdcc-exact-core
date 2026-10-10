@@ -17,3 +17,36 @@ jobs:
       - run: python -m pytest -q tests/test_exact.py tests/test_isa.py tests/test_compiler.py
       - name: the demo still runs end to end
         run: tdcc-exact demo
+
+  program:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cache/solana
+            target
+          key: program-${{ hashFiles('Cargo.lock') }}
+      - name: Solana CLI (Agave)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: program unit tests (settlement vectors, commitment)
+        run: cargo test -p tdcc_exact
+      - name: build the program
+        run: cargo build-sbf --manifest-path programs/tdcc_exact/Cargo.toml
+      - run: pip install -e '.[chain]' pytest
+      - name: the program on a local validator
+        run: |
+          solana-test-validator --reset --quiet --ledger /tmp/ledger \
+            --bpf-program HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A \
+            target/deploy/tdcc_exact.so &
+          for i in $(seq 60); do solana -ul cluster-version && break; sleep 1; done
+          TDCC_EXACT_REQUIRE_CHAIN=1 python -m pytest -q tests/test_chain.py
+          TDCC_EXACT_KEYS=/tmp/keys tdcc-exact demo --localnet --commit-window 60 --challenge-window 30
