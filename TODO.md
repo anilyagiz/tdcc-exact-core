@@ -39,19 +39,22 @@ The deck's demo ends with "All in Solana Explorer". Nothing on-chain exists yet.
       (generated, funded by airdrop; never committed).
 
 ### 3. The real model (LFM2.5-230M)
-Only the tiny random model has run.
-- [ ] Install `transformers` and download `LiquidAI/LFM2.5-230M` into `models/`.
-- [ ] Check that `new_job` works with its tokenizer: chat template, "Yes" / "No" as single
+Done: LFM2.5-230M runs end to end (`tdcc-exact demo --model models/LFM2.5-230M`, 5 min 45 s
+on the simulator); numbers in docs/exact.md sections 5 and 6.
+- [x] Install `transformers` and download `LiquidAI/LFM2.5-230M` into `models/`.
+- [x] Check that `new_job` works with its tokenizer: chat template, "Yes" / "No" as single
       tokens (if not: take the first token of each, or compare the sums).
-- [ ] Measure: simulator seconds per token with the trace log on and off, checkpoints per
+- [x] Measure: simulator seconds per token with the trace log on and off, checkpoints per
       job, trace file size. Write the numbers into docs/exact.md ("Overhead of the log").
-- [ ] Prompt prefill: `run_job` feeds the prompt one token per run (`Engine.step`). Use
+- [x] Prompt prefill: `run_job` feeds the prompt one token per run (`Engine.step`). Use
       `Engine.prefill` (chunked, far fewer runs) and check it is still deterministic.
-- [ ] Check `SkipLayer` on LFM2's program: its layers repeat inside a hardware LOOP
+- [x] Check `SkipLayer` on LFM2's program: its layers repeat inside a hardware LOOP
       (`plan` loops the repeated unit), so "1/L of the run's MMs" may not be one layer.
       Better: skip by the compiler's source frames (`Instr.src`) or by layer markers.
-- [ ] Answer quality: a handful of real yes/no questions with known answers, to show the
+- [x] Answer quality: a handful of real yes/no questions with known answers, to show the
       oracle is right (not just reproducible).
+- [ ] The model answers Yes to every question with this prompt (3 of 7 right, docs/exact.md
+      section 6): a larger model, or a calibrated Yes - No threshold, before a real oracle.
 
 ### 4. Security fixes before anyone else sees the protocol
 - [ ] **Copy attack.** Honest runs post the same fingerprint, so a lazy provider can copy

@@ -1,4 +1,6 @@
 """TDCC Exact: the trace log, the receipt's fingerprint and the dispute, on the tiny model."""
+from pathlib import Path
+
 import pytest
 
 from opentpu import isa as I
@@ -71,3 +73,27 @@ def test_settlement_splits():
     s = slash("j", "B", "renter", "verifier", 1_000_000, 10_000_000)
     got = {t[0]: t[1] for t in s.transfers}
     assert got["renter"] == 1_000_000 and got["verifier"] == 5_000_000 and got["B"] == -10_000_000
+
+
+LFM2 = Path(__file__).resolve().parents[1] / "models" / "LFM2.5-230M"
+
+
+@pytest.mark.skipif(not LFM2.exists(), reason="models/LFM2.5-230M is not downloaded")
+def test_lfm2_job_is_reproducible_and_a_skipped_layer_is_seen():
+    """The real model (about a minute): the chat template's job, two honest runs of its first
+    8 tokens (one prefill run) post one fingerprint, and skipping a layer inside the hardware
+    loop of LFM2's repeated (conv, attention) unit changes it."""
+    pytest.importorskip("transformers")
+    pytest.importorskip("torch")
+    from tdcc_exact.oracle import load_model
+    job = new_job(str(LFM2), "Is Paris the capital of France?", "lfm2")
+    assert (job.yes_id, job.no_id) == (12948, 5048)
+    job.prompt_ids = job.prompt_ids[:8]
+    model = load_model(job.model)
+    a = run_job(job, "A", model=model)
+    b = run_job(job, "A2", model=model)
+    assert a.receipt.fingerprint == b.receipt.fingerprint
+    cheat = SkipLayer(5, layers_of(model[0]))
+    c = run_job(job, "B", cheat, model=model)
+    assert c.receipt.extra["skipped_mms"] == 88       # layer 5 (conv): 8 mixer + 80 MLP MMs
+    assert c.receipt.fingerprint != a.receipt.fingerprint

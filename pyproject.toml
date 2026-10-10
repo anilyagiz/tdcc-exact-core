@@ -6,6 +6,10 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = ["numpy", "textual"]
 
+[project.optional-dependencies]
+# real checkpoints (models/LFM2.5-230M): the tokenizer's chat template, the safetensors reader
+model = ["transformers", "jinja2", "huggingface_hub", "safetensors", "torch"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
