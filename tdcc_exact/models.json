@@ -1,4 +1,11 @@
 {
+ "LFM2.5-230M|int8|256": {
+  "cap": 256,
+  "image_hash": "f8f1ff26a3b5d91e3a8fb1b9fbe83afb657bab50f39e98319d7696519d2ece02",
+  "model": "LFM2.5-230M",
+  "source": "LiquidAI/LFM2.5-230M (Hugging Face), int8, default design config",
+  "wformat": "int8"
+ },
  "tiny|int8|256": {
   "cap": 256,
   "image_hash": "86159501127ce154d411cb1bc3cd8664209032b79af09ebf3ec6d91e35c2f014",

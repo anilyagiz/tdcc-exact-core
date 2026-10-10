@@ -53,31 +53,59 @@ class _SkippingSlice(Slice):
         super().execute(ins)
 
 
+# The kernel functions whose matrix multiplies make up a layer, by the compiler's source
+# frames (Instr.src): its token mixer (attention, or LFM2's short convolution), then its MLP.
+MIXERS = frozenset({"_attention", "_attention_rows", "_conv", "_conv_rows"})
+MLPS = frozenset({"_mlp"})
+
+
+def layer_part(ins) -> str | None:
+    """"mixer", "mlp" or None (the LM head, anything outside a layer): the part of a layer
+    that emitted `ins`, by its source frames."""
+    names = {f[2] for f in getattr(ins, "src", ())}
+    if names & MLPS:
+        return "mlp"
+    if names & MIXERS:
+        return "mixer"
+    return None
+
+
 class SkipLayer:
-    """Provider B's shortcut: in every device run, leave out the matrix multiplies of one
-    layer's share of the run (MMs number [layer, layer + 1) * n / layers of the run's n, n
-    taken from the first run it watched). The answer often looks the same; its trace does
-    not."""
+    """Provider B's shortcut: in every device run, leave out the matrix multiplies of layer
+    `layer` (its mixer's and its MLP's). The answer often looks the same; its trace does not.
+
+    The layers repeat inside a hardware LOOP (qwen3 Image.runs, lfm2.plan), so one MM of the
+    program runs once per layer of the loop, and a share of a run's MMs is not one layer.
+    Instead the layers are counted as they run: per slice and run, a mixer's MM that follows
+    an MLP's (or is the run's first) starts the next layer. The parts are told apart by the
+    compiler's source frames (Instr.src, layer_part)."""
 
     def __init__(self, layer: int, layers: int):
+        if not 0 <= layer < layers:
+            raise ValueError(f"layer {layer} of a {layers}-layer model")
         self.layer, self.layers = layer, layers
-        self.per_run: int | None = None
-        self.n = 0
         self.skipped = 0
+        self._parts: dict = {}           # Instr.src -> layer_part
+        self._at: dict = {}              # slice id -> [layer index, last part]
 
     def start(self) -> None:
-        self.n = 0
+        self._at = {}
 
     def end(self) -> None:
-        if self.per_run is None:
-            self.per_run = self.n
+        pass
 
     def skip(self, s, ins) -> bool:
-        self.n += 1
-        if self.per_run is None:
-            return False                  # the first run: honest, to learn its size
-        per = self.per_run / self.layers
-        if self.layer * per <= self.n - 1 < (self.layer + 1) * per:
+        src = ins.src
+        part = self._parts.get(src, False)
+        if part is False:
+            part = self._parts[src] = layer_part(ins)
+        if part is None:
+            return False
+        at = self._at.setdefault(s.sid, [-1, None])
+        if part == "mixer" and at[1] != "mixer":
+            at[0] += 1
+        at[1] = part
+        if at[0] == self.layer:
             self.skipped += 1
             return True
         return False

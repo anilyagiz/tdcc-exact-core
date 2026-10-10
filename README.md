@@ -44,14 +44,14 @@ tdcc-exact demo
 ```
 1. renter opens a yes/no oracle job on tiny, locks 2.00 USDC
 2. provider A runs it honestly; provider B skips layer 1 to save time
-   A: NO  98e3fcd5...
-   B: YES b4f6bf4d...  (667 matrix multiplies skipped)
+   A: NO  3c85c23e...
+   B: NO  5013c640...  (168 matrix multiplies skipped: same answer, other fingerprint)
 3. a verifier re-runs the job on this laptop
    A: match -> accept
    B: MISMATCH -> challenge
 4. searching B's trace for the first instruction that went wrong
-   bisection: checkpoint 1 of 26 differs (5 rounds), steps 423..844
-   first fault: step 634, slice 0, pc 12 (state)
+   bisection: checkpoint 0 of 3 differs (2 rounds), steps 1..1302
+   first fault: step 659, slice 0, pc 11 (state)
      MM ... ; mm 1x256 . 128x256^T
 5. settlement (the Solana program executes these transfers)
 ```
@@ -92,14 +92,14 @@ tdcc-exact demo --localnet
 1. renter opens the oracle job on tiny with A and with B, 2.00 USDC each into escrow
    open_job: https://explorer.solana.com/tx/3FefAq...
 2. A runs it honestly; B skips layer 1 to save time
-   A: NO   fingerprint 98e3fcd593fde2b4..  commit https://explorer.solana.com/tx/2DBA3c...
-   B: YES  fingerprint b4f6bf4df1073e8c..  commit https://explorer.solana.com/tx/3rGpt6...
+   A: NO   fingerprint 3c85c23ed010bb42..  commit https://explorer.solana.com/tx/2DBA3c...
+   B: NO   fingerprint 5013c640414f99c6..  commit https://explorer.solana.com/tx/3rGpt6...
    A reveals: ...   B reveals: ...
 3. a verifier re-runs the job on this laptop
    A: match -> accept
    B: MISMATCH -> challenge https://explorer.solana.com/tx/4tMgaz...
 4. bisecting B's trace for the first instruction that went wrong
-   first fault: step 634, slice 0, pc 12 (state)
+   first fault: step 659, slice 0, pc 11 (state)
    the arbiter slashes B: https://explorer.solana.com/tx/4jqHqx...
    renter +2.00 USDC   verifier +25.00 USDC   treasury +25.00 USDC
 5. A's challenge window closes; anyone settles A's job

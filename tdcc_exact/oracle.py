@@ -1,8 +1,9 @@
 """A yes/no oracle job on Exact Core: the job, the run, and the receipt a provider posts.
 
 A job names a model, a prompt (its token ids, so the verifier needs no tokenizer) and the two
-answer tokens. Running it feeds the prompt through the engine one token at a time on a traced
-backend, and the answer is whichever of the two tokens gets the larger logit after the last one.
+answer tokens. Running it feeds the prompt through the engine in device runs of `chunk` tokens
+(Engine.prefill) on a traced backend, and the answer is whichever of the two tokens gets the
+larger logit after the last one.
 
 The receipt's fingerprint binds everything a verifier re-checks:
 
@@ -34,6 +35,7 @@ class Job:
     question: str = ""
     wformat: str = "int8"
     cap: int = 256               # the KV cache's positions
+    chunk: int = 8               # prompt tokens per device run (Engine.prefill: the trace's shape)
     job_id: str = ""
 
     @property
@@ -131,9 +133,11 @@ def new_job(model: str, question: str, job_id: str = "") -> Job:
            {"role": "user", "content": question}]
     ids = tok.apply_chat_template(msg, add_generation_prompt=True, tokenize=True)
     ids = list(ids["input_ids"] if hasattr(ids, "keys") else ids)
+    # LFM2.5: "Yes" = 12948 and "No" = 5048, one token each (as the assistant's turn starts,
+    # without a leading space). A tokenizer that splits them: their first tokens, which differ
     yes, no = (tok.encode(w, add_special_tokens=False) for w in ("Yes", "No"))
-    if len(yes) != 1 or len(no) != 1:
-        raise ValueError(f"{model}: 'Yes' / 'No' are not single tokens ({yes}, {no})")
+    if yes[0] == no[0]:
+        raise ValueError(f"{model}: 'Yes' / 'No' start with the same token ({yes}, {no})")
     return Job(model, ids, yes[0], no[0], question=question, job_id=job_id)
 
 
@@ -156,14 +160,12 @@ def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
             every: int = EVERY, window=None, model=None) -> Run:
     """Run `job` on a traced Exact Core simulator (cheat: a dishonest provider's shortcut;
     window: (lo, hi], record each step there for a dispute)."""
-    from opentpu.llm.qwen3 import Engine
+    from opentpu.llm.qwen3 import Engine    # (every Spec's engine: Qwen3, LFM2, ...)
     spec, W = model if model is not None else load_model(job.model)
     log = TraceLog(every=every, window=window)
     eng = Engine(spec, W, cap=job.cap, backend=factory(log, cheat), wformat=job.wformat,
-                 pipeline=False)
-    logits = None
-    for t in job.prompt_ids:
-        logits = eng.step(int(t))
+                 rows=job.chunk, pipeline=False)
+    logits = eng.prefill([int(t) for t in job.prompt_ids], chunk=job.chunk)
     logits = np.asarray(logits, np.float32).reshape(-1)
     answer = "YES" if logits[job.yes_id] > logits[job.no_id] else "NO"
     mh, lh, root = eng.backend.model_hash, h(logits.tobytes()), log.root
