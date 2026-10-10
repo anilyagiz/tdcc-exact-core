@@ -62,8 +62,61 @@ locally, the provider with the shortcut it took (`--replay-skip-layer`).
 - **Slashed:** the renter's escrow is refunded, the verifier gets half of the provider's
   stake, and TDCC gets the rest.
 
-The Solana program that holds the escrow and the stakes and executes these transfers is a
-separate piece; this module only computes them.
+Shares are in basis points, rounded down, with the remainder to TDCC; the Python module and
+the program compute the same numbers, and both are tested against
+`tests/data/exact_settle_vectors.json` (odd amounts up to `u64::MAX`).
+
+## 5. Receipts people can stake money on
+
+- **The copy attack.** Honest runs post the same fingerprint, so a provider could copy
+  another's receipt without running anything. Receipts are posted by commit-reveal
+  (`tdcc_exact/commit.py`): first `SHA-256("tdcc-exact/commit/v1" || fingerprint || provider
+  key || salt)`, then, after the commit deadline, the fingerprint and the salt. A commitment
+  binds its provider's key, and by the time fingerprints are public the commit window is shut.
+- **Digest size.** Every hash is SHA-256 (32 bytes): 128-bit collision resistance, and the
+  hash Solana's runtime computes as a syscall, so the program can check commitments (and,
+  later, Merkle paths of the trace).
+- **Model identity.** The model hash is the hash of the DRAM image the engine builds, which
+  depends on the build (weight format, KV cache size, design config) as well as the weights.
+  `tdcc_exact/models.json` pins `(model, wformat, cap) -> image hash`
+  (`tdcc-exact registry add --model ...`); `verify` rejects a receipt with another hash before
+  re-running anything, and the program rejects a reveal whose model hash is not the job's. A
+  provider that runs fp4 instead of int8 is caught there (`tests/test_exact.py`).
+
+## 6. The Solana program (`programs/tdcc_exact`)
+
+An Anchor program; `tdcc_exact/chain.py` is its client, `tdcc-exact demo --localnet/--devnet`
+runs the demo against it.
+
+| Account | Seeds | Holds |
+|:--|:--|:--|
+| `Config` | `config, admin` | the mint (USDC), the treasury, the vault, 80/20 and 50/50 in bps, the windows (slots), the minimum stake, the unstake cooldown |
+| vault | `vault, config` | one token account for every escrow and every stake; its authority is the config |
+| `Provider` | `provider, config, owner` | the stake, open jobs, a pending unstake |
+| `Job` | `job, config, renter, job id` | the job digest, the expected model hash, the price, the state, the deadlines, the commitment, the revealed fingerprint and trace root, the challenger |
+
+A market is a config, seeded by its admin's key, so anyone can run one (the demo makes its own
+test USDC mint). The admin is also the **arbiter**: it signs `slash` (or `dismiss`) after the
+off-chain bisection names the faulty step, which goes into the `Slashed` event. Replacing the
+arbiter by an on-chain bisection game is TODO.md item 6.
+
+| Instruction | Who | When |
+|:--|:--|:--|
+| `register_provider`, `stake`, `request_unstake`, `unstake` | provider | unstake after the cooldown and with no open jobs |
+| `open_job` | renter | the provider is staked; the price moves into the vault |
+| `commit_receipt` | the job's provider | until `commit_deadline` |
+| `reveal_receipt` | the job's provider | after `commit_deadline`, until `reveal_deadline`; opens the commitment, model hash must be the job's |
+| `challenge` | anyone but the provider | until `challenge_deadline`, with another fingerprint |
+| `settle` | anyone | revealed, unchallenged, after `challenge_deadline` |
+| `slash`, `dismiss` | the arbiter | challenged |
+| `expire` | anyone | no reveal by `reveal_deadline`: the escrow goes back to the renter |
+
+Tests: `cargo test -p tdcc_exact` (the settlement vectors, the commitment vector) and
+`tests/test_chain.py` on `solana-test-validator` (honest settle, slash, a copied commitment,
+an early reveal, a wrong model hash, a wrong signer, expiry, double settle, a dismissed
+challenge; each checks the program's error code). CI runs both.
+
+Not yet: a challenge bond, verifier selection, the on-chain bisection (TODO.md items 6, 7).
 
 ## Status
 
@@ -72,4 +125,5 @@ separate piece; this module only computes them.
 | Trace log, fingerprint, dispute | on the bit-exact ISA simulator, tested (`tests/test_exact.py`) |
 | Trace log in RTL / on the card | not built: the card has a performance trace (`otpu_trace.sv`), not this hash chain |
 | Overhead of the log | not measured on LFM2.5-230M yet |
-| Solana program | not in this repository |
+| Receipts: commit-reveal, SHA-256, model registry | done, tested |
+| Solana program | `programs/tdcc_exact`, tested on a local validator; challenges decided by an arbiter |

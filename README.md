@@ -27,8 +27,10 @@ hardware and its speed on the card are not built or measured yet.
 4. **Settle.** Honest providers get paid (80% host, 20% TDCC). A cheater loses its stake: the
    renter is refunded and the verifier takes a share.
 
-Compute runs off-chain. Money, proof and penalties live on Solana (the program is not in this
-repository; `tdcc_exact/settle.py` computes the transfers it executes).
+Compute runs off-chain. Money, proof and penalties live on Solana: the Anchor program in
+[`programs/tdcc_exact`](programs/tdcc_exact) (program id
+`HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A`) holds the escrow and the stakes, takes
+receipts by commit-reveal, and executes the transfers `tdcc_exact/settle.py` computes.
 
 ## Try the demo
 
@@ -42,8 +44,8 @@ tdcc-exact demo
 ```
 1. renter opens a yes/no oracle job on tiny, locks 2.00 USDC
 2. provider A runs it honestly; provider B skips layer 1 to save time
-   A: NO  2df44a94...
-   B: YES bc1f7c5e...  (667 matrix multiplies skipped)
+   A: NO  98e3fcd5...
+   B: YES b4f6bf4d...  (667 matrix multiplies skipped)
 3. a verifier re-runs the job on this laptop
    A: match -> accept
    B: MISMATCH -> challenge
@@ -72,7 +74,44 @@ tdcc-exact verify --job job.json --receipt b.json      # CHALLENGE, exit 1
 tdcc-exact dispute --job job.json --trace b.trace.json --replay-skip-layer 1
 ```
 
-[docs/exact.md](docs/exact.md) describes the trace log, the fingerprint and the dispute.
+### On Solana
+
+The same five steps, each a transaction with its Explorer link (`--localnet` on
+`solana-test-validator`, `--devnet` on devnet). The run creates its own market (a test USDC
+mint, a treasury) and keypairs under `~/.config/tdcc-exact/<cluster>/` on first use:
+
+```sh
+pip install -e '.[chain]'
+cargo build-sbf --manifest-path programs/tdcc_exact/Cargo.toml     # Solana CLI (Agave)
+solana-test-validator --reset --bpf-program \
+    HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A target/deploy/tdcc_exact.so &
+tdcc-exact demo --localnet
+```
+
+```
+1. renter opens the oracle job on tiny with A and with B, 2.00 USDC each into escrow
+   open_job: https://explorer.solana.com/tx/3FefAq...
+2. A runs it honestly; B skips layer 1 to save time
+   A: NO   fingerprint 98e3fcd593fde2b4..  commit https://explorer.solana.com/tx/2DBA3c...
+   B: YES  fingerprint b4f6bf4df1073e8c..  commit https://explorer.solana.com/tx/3rGpt6...
+   A reveals: ...   B reveals: ...
+3. a verifier re-runs the job on this laptop
+   A: match -> accept
+   B: MISMATCH -> challenge https://explorer.solana.com/tx/4tMgaz...
+4. bisecting B's trace for the first instruction that went wrong
+   first fault: step 634, slice 0, pc 12 (state)
+   the arbiter slashes B: https://explorer.solana.com/tx/4jqHqx...
+   renter +2.00 USDC   verifier +25.00 USDC   treasury +25.00 USDC
+5. A's challenge window closes; anyone settles A's job
+   A +1.60 USDC  job paid    tdcc +0.40 USDC  protocol fee
+   final: {'A': 'Settled', 'B': 'Slashed'}
+```
+
+On devnet the admin key needs about 1 SOL first (`tdcc-exact demo --devnet` prints its address
+when it has none; https://faucet.solana.com).
+
+[docs/exact.md](docs/exact.md) describes the trace log, the fingerprint, the dispute, the
+security of receipts and the Solana program.
 
 ---
 

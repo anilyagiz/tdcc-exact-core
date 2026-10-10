@@ -4,7 +4,7 @@ What the hackathon deck promises, against what this repository does today. Prior
 **P0** the devnet demo in the deck, **P1** a market that holds up against real cheaters,
 **P2** hardware and mainnet (the deck's 30 / 60 / 90 days).
 
-Done today: the trace log, oracle jobs, receipts, the bisection dispute and the settlement
+Done: the trace log, oracle jobs, receipts, the bisection dispute and the settlement
 split, all on the bit-exact ISA simulator with a tiny random model (`tdcc-exact demo`,
 `tests/test_exact.py`, docs/exact.md).
 
@@ -12,30 +12,32 @@ split, all on the bit-exact ISA simulator with a tiny random model (`tdcc-exact 
 
 ## P0: the demo in the deck (Solana devnet, LFM2.5-230M)
 
-### 1. The Solana program (not started)
+### 1. The Solana program (built, tested on a local validator; devnet deploy pending)
 The deck's demo ends with "All in Solana Explorer". Nothing on-chain exists yet.
-- [ ] Anchor workspace in `programs/tdcc_exact/` (Rust), deployed to devnet; program id in
-      the README.
-- [ ] Accounts: `Config` (fee 20%, verifier share 50%, challenge window, min stake),
+- [x] Anchor workspace in `programs/tdcc_exact/` (Rust); program id in the README.
+- [ ] Deploy to devnet: needs ~2.5 SOL on the deployer key (the devnet airdrop is rate
+      limited; https://faucet.solana.com), then
+      `solana program deploy -ud target/deploy/tdcc_exact.so --program-id target/deploy/tdcc_exact-keypair.json`.
+- [x] Accounts: `Config` (fee 20%, verifier share 50%, challenge window, min stake),
       `Provider` (owner, staked USDC, status), `Job` (renter, model id, job digest, price,
       escrow vault, state), `Receipt` (provider, fingerprint, trace root, checkpoint count,
       posted slot), `Challenge` (verifier, bisection state).
-- [ ] Instructions: `register_provider` / `stake` / `unstake` (with a cooldown),
+- [x] Instructions (plus commit/reveal, `dismiss`, `expire`): `register_provider` / `stake` / `unstake` (with a cooldown),
       `open_job` (USDC SPL transfer into an escrow PDA), `post_receipt`,
       `challenge`, `settle` (after the window: 80% host / 20% TDCC), `slash` (refund the
       renter, half the stake to the verifier, the rest to TDCC).
-- [ ] USDC on devnet: the devnet USDC mint, or a test mint the demo creates.
-- [ ] Program tests (anchor test / bankrun): honest settle, slash, window expiry,
+- [x] USDC on devnet: a test mint the demo creates (6 decimals), per market.
+- [x] Program tests (tests/test_chain.py on solana-test-validator): honest settle, slash, window expiry,
       double settle, wrong signer.
-- [ ] `tdcc_exact/settle.py` must match the program's arithmetic (rounding of 80/20 and
+- [x] `tdcc_exact/settle.py` must match the program's arithmetic (rounding of 80/20 and
       50/50 on odd amounts): one shared test vector file.
 
 ### 2. A client that connects the CLI to the chain
-- [ ] `tdcc_exact/chain.py` (solana-py / solders, or a small TypeScript client): open a job,
+- [x] `tdcc_exact/chain.py` (solders, or a small TypeScript client): open a job,
       post a receipt, challenge, settle; print Explorer links.
-- [ ] `tdcc-exact demo --devnet`: the same 5 steps as today, each step a real devnet
+- [x] `tdcc-exact demo --devnet` (and `--localnet`, run end to end): the same 5 steps as today, each step a real devnet
       transaction, with its Explorer link printed.
-- [ ] Devnet keypairs for renter, provider A, provider B, verifier and TDCC treasury
+- [x] Devnet keypairs for renter, provider A, provider B, verifier and TDCC treasury
       (generated, funded by airdrop; never committed).
 
 ### 3. The real model (LFM2.5-230M)
@@ -54,24 +56,24 @@ Only the tiny random model has run.
       oracle is right (not just reproducible).
 
 ### 4. Security fixes before anyone else sees the protocol
-- [ ] **Copy attack.** Honest runs post the same fingerprint, so a lazy provider can copy
+- [x] **Copy attack.** (commit-reveal, tdcc_exact/commit.py and the program) Honest runs post the same fingerprint, so a lazy provider can copy
       provider A's receipt without running anything. Fix: commit-reveal (post
       `H(fingerprint || provider pubkey || salt)` first, reveal after the commit window),
       or bind the provider into the trace (its key in the chain's first hash).
-- [ ] **Digest size.** `trace.DIGEST = 16` (blake2b-128) gives 64-bit collision
+- [x] **Digest size.** (SHA-256) `trace.DIGEST = 16` (blake2b-128) gives 64-bit collision
       resistance: too little for a value people stake money on. Use 32 bytes (blake2b-256,
       or SHA-256 to match Solana's syscall).
-- [ ] **Model identity.** The model hash is the hash of the DRAM image the engine builds,
+- [x] **Model identity.** (tdcc_exact/registry.py, models.json; the job stores the hash) The model hash is the hash of the DRAM image the engine builds,
       which depends on the build config (MCOLS, LANES, formats). Pin a model registry:
       model id -> (checkpoint hash, wformat, config) -> expected image hash.
-- [ ] **Job parameters the provider could change**: `wformat`, `cap`. They are in the job
+- [x] **Job parameters the provider could change**: `wformat`, `cap`. They are in the job
       digest already; add a test that a provider who runs fp4 instead of int8 is caught.
 
 ### 5. Deliverables for the submission
 - [ ] Demo video (screen capture of `tdcc-exact demo --devnet` + Explorer).
 - [ ] The deck's "Code: [GitHub link]" and "Demo: [video link]".
 - [ ] Repo visibility: it is private now; make it public for the judges.
-- [ ] CI: GitHub Actions on Ubuntu running `python -m pytest -q tests/test_exact.py
+- [x] CI: GitHub Actions on Ubuntu (also builds the program and runs it on a local validator) running `python -m pytest -q tests/test_exact.py
       tests/test_isa.py tests/test_compiler.py` (the upstream suite needs Linux: `fcntl`).
 
 ---
