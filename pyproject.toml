@@ -26,4 +26,5 @@ otpu-memcal = "opentpu.host.memcal:main"
 include = ["opentpu*", "tdcc_exact*"]
 
 [tool.setuptools.package-data]
+tdcc_exact = ["models.json"]
 opentpu = ["lens_app.html", "host/setup_pcie.sh", "host/pcie/*", "host/litedram/*"]

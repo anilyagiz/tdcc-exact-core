@@ -144,6 +144,14 @@ class Run:
     logits: np.ndarray
 
 
+def build_hash(model: str, wformat: str = "int8", cap: int = 256, loaded=None) -> str:
+    """The image hash a model build gets (what the registry pins), without running anything."""
+    from opentpu.llm.qwen3 import Engine
+    spec, W = loaded if loaded is not None else load_model(model)
+    eng = Engine(spec, W, cap=cap, backend=factory(TraceLog()), wformat=wformat, pipeline=False)
+    return eng.backend.model_hash.hex()
+
+
 def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
             every: int = EVERY, window=None, model=None) -> Run:
     """Run `job` on a traced Exact Core simulator (cheat: a dishonest provider's shortcut;

@@ -71,3 +71,62 @@ def test_settlement_splits():
     s = slash("j", "B", "renter", "verifier", 1_000_000, 10_000_000)
     got = {t[0]: t[1] for t in s.transfers}
     assert got["renter"] == 1_000_000 and got["verifier"] == 5_000_000 and got["B"] == -10_000_000
+
+
+# ------------------------------------------------------------------ settlement vectors
+def test_settlement_matches_the_shared_vectors():
+    """The Solana program's tests read the same file (programs/tdcc_exact)."""
+    import json
+    from pathlib import Path
+    from tdcc_exact.settle import HOST_BPS, VERIFIER_BPS
+    v = json.loads((Path(__file__).parent / "data/exact_settle_vectors.json").read_text())
+    assert (v["host_bps"], v["verifier_bps"]) == (HOST_BPS, VERIFIER_BPS)
+    for c in v["accept"]:
+        t = {x[0]: x[1] for x in accept("j", "A", c["price"]).transfers}
+        assert (t["A"], t["tdcc"]) == (c["host"], c["tdcc"])
+    for c in v["slash"]:
+        t = {x[0]: x[1] for x in slash("j", "B", "r", "v", 1, c["stake"]).transfers}
+        assert (t["v"], t["tdcc"]) == (c["verifier"], c["tdcc"])
+
+
+# ------------------------------------------------------------------ the security fixes
+def test_digest_is_256_bits():
+    from tdcc_exact.trace import DIGEST, h
+    assert DIGEST == 32 and len(h(b"x")) == 32
+
+
+COMMIT_VECTOR = {   # programs/tdcc_exact/tests checks the same hash
+    "fingerprint": "11" * 32, "provider": "22" * 32, "salt": "33" * 32,
+    "commitment": "00ccd4f49b63c10bc652bb5eab7217fa9a073baa49f8818e68fa47fcb64fa255"}
+
+
+def test_commitment_vector():
+    from tdcc_exact.commit import commitment
+    v = COMMIT_VECTOR
+    got = commitment(bytes.fromhex(v["fingerprint"]), bytes.fromhex(v["provider"]),
+                     bytes.fromhex(v["salt"]))
+    assert got.hex() == v["commitment"]
+
+
+def test_a_copied_receipt_does_not_open_the_copiers_commitment(setup):
+    """The copy attack: C copies A's fingerprint. A's commitment binds A's key, and C had to
+    commit before A revealed, so C's commitment was made without the fingerprint."""
+    from tdcc_exact.commit import check_reveal, commitment, new_salt
+    _, _, a = setup
+    fp = bytes.fromhex(a.receipt.fingerprint)
+    sa = new_salt()
+    ca = commitment(fp, "A", sa)
+    assert check_reveal(ca, fp, "A", sa)
+    assert not check_reveal(ca, fp, "C", sa)            # A's commitment is useless to C
+    guess = commitment(bytes(32), "C", sa)               # what C could commit before the reveal
+    assert not check_reveal(guess, fp, "C", sa)
+
+
+def test_a_provider_running_fp4_instead_of_int8_is_caught(setup):
+    import dataclasses
+    from tdcc_exact import registry
+    job, model, a = setup
+    assert registry.check(job, a.receipt.model_hash) is None    # the honest int8 run
+    cheap = run_job(dataclasses.replace(job, wformat="fp4"), "B", every=EVERY, model=model)
+    assert registry.check(job, cheap.receipt.model_hash) is not None
+    assert cheap.receipt.fingerprint != a.receipt.fingerprint

@@ -10,7 +10,7 @@ observer hook in `isasim.Machine.run`, called after each instruction a slice ste
 
 ## 1. The trace log (`tdcc_exact/trace.py`)
 
-Every instruction the simulator steps extends a hash chain (blake2b-128):
+Every instruction the simulator steps extends a hash chain (SHA-256, the hash Solana's runtime offers as a syscall):
 
     chain = H(chain || slice || pc || the instruction's 8 words || R0..R15 after it)
 

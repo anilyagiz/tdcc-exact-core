@@ -1,0 +1,9 @@
+{
+ "tiny|int8|256": {
+  "cap": 256,
+  "image_hash": "86159501127ce154d411cb1bc3cd8664209032b79af09ebf3ec6d91e35c2f014",
+  "model": "tiny",
+  "source": "tdcc_exact.oracle.tiny_model(seed=0), the default design config",
+  "wformat": "int8"
+ }
+}
