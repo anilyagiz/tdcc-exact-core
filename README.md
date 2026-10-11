@@ -107,6 +107,21 @@ tdcc-exact demo --localnet
    final: {'A': 'Settled', 'B': 'Slashed'}
 ```
 
+**Live on devnet** (program deployed 2026-10-11, slot 509881888):
+[program](https://explorer.solana.com/address/HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A?cluster=devnet).
+One full run of `tdcc-exact demo --devnet` (64 s):
+
+| Step | Transaction |
+|:--|:--|
+| market created (test USDC mint) | [tx](https://explorer.solana.com/tx/3RLAPNPZJkFBpf7Sz9t3CoS3o97hG2enNpHimrwjPztMqnFcRAapdRZe5SWdZZpU8NgMDNcAyBcXofmRKFEhuJZc?cluster=devnet) |
+| job A opened (escrow) | [account](https://explorer.solana.com/address/DDST8qU4M3wEDY9HabvZdUECH99SEygXEjVocSd1MMFw?cluster=devnet), [open_job](https://explorer.solana.com/tx/3mgS77bVAXgBZWgQ5uDK5C3MF8QK3s7e9jRmf9Ysj2UkFEuro2FJZ5jwJiXwUEsSxgUmwGATHiEgM2Ya7PGVJZrg?cluster=devnet) |
+| job B opened (escrow) | [account](https://explorer.solana.com/address/FZrWiJhXw7HAAMSh78KsUX4SUhKN7kTAqjk3UQsbhu3C?cluster=devnet), [open_job](https://explorer.solana.com/tx/1hkK8UPsbjtiT77J4NSwY5RWSzDxZHbzfPCoc5KaNC6kSrSS5wZPFQsXjPmfUTLokbMPLuqrZ3GFdytJNXY9cVF?cluster=devnet) |
+| A, B commit | [A](https://explorer.solana.com/tx/3kCLNn1t2ZVTrYR5PsaaEQY1mfwrHoP7SXbMYPpRdNraBjUgwcinZFuxmMYBCBocdHiNonmG8Sx4joUZxeeQiKN9?cluster=devnet), [B](https://explorer.solana.com/tx/pjikmK9qPq7pWir5sn4rPNaqdg84Wso83dGKGAHTxYx23ftfc22EoLWUJ9btMGUH3d1zn2ViRaiA1Uzt1WByKa6?cluster=devnet) |
+| A, B reveal | [A](https://explorer.solana.com/tx/5fx7gLRSgUnRa6hu9bhhBHdZt9h7ZHTmtihfankYAggxfYWXnXHr6Up4YGEbYVt3F1rMSmDE1w73FJynvui5eKQc?cluster=devnet), [B](https://explorer.solana.com/tx/2VzvgQGQtVnwJngkua9XzgwXWPjgPCaFZ1acatM6KuBuDRa7cbJhaAAHn9xpNZeTB2NtMpXz48XcQ24wpy7gqnxG?cluster=devnet) |
+| verifier challenges B | [tx](https://explorer.solana.com/tx/2w6gWmLDXE1JtwVsTekkQ7gSLt9TiNo3Zj6NoUGtwqMCMnVKcun17CkRpKbwy43R8oNG6mAyJwPmb93niViTNFJp?cluster=devnet) |
+| B slashed (fault: step 659, an `MM`) | [tx](https://explorer.solana.com/tx/4P3qQcVgRkMSYtdyzmRQ2SN9VRnkcgw24UHUNuYem8WyzTaZXduDsUySG2nKVurUPbEZsmDYSHJKWeWB5paVYrrR?cluster=devnet) |
+| A settled 80/20 | [tx](https://explorer.solana.com/tx/qVxkY4fA9pmuGqKwFoNrRNoW2mnxHCpHdTnSDQLkgggp79KTd6kN3trZD8vaD4HG6HTZ43ZRiMFmwdJisU43JdX?cluster=devnet) |
+
 On devnet the admin key needs about 1 SOL first (`tdcc-exact demo --devnet` prints its address
 when it has none; https://faucet.solana.com).
 
