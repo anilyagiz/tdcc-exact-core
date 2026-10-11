@@ -1,0 +1,19 @@
+[toolchain]
+anchor_version = "1.2.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+tdcc_exact = "HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A"
+
+[programs.devnet]
+tdcc_exact = "HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "python -m pytest -q tests/test_chain.py"

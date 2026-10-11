@@ -6,6 +6,11 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = ["numpy", "textual"]
 
+[project.optional-dependencies]
+chain = ["solders>=0.21"]
+# real checkpoints (models/LFM2.5-230M): the tokenizer's chat template, the safetensors reader
+model = ["transformers", "jinja2", "huggingface_hub", "safetensors", "torch"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -26,4 +31,5 @@ otpu-memcal = "opentpu.host.memcal:main"
 include = ["opentpu*", "tdcc_exact*"]
 
 [tool.setuptools.package-data]
+tdcc_exact = ["models.json"]
 opentpu = ["lens_app.html", "host/setup_pcie.sh", "host/pcie/*", "host/litedram/*"]

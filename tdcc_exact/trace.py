@@ -25,12 +25,13 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
-DIGEST = 16                      # bytes per hash (blake2b-128)
+DIGEST = 32                      # bytes per hash (SHA-256: Solana's sol_sha256 syscall, so the
+                                 # program can recompute commitments and Merkle paths on-chain)
 EVERY = 4096                     # steps between checkpoints
 
 
 def h(*parts: bytes) -> bytes:
-    m = hashlib.blake2b(digest_size=DIGEST)
+    m = hashlib.sha256()
     for p in parts:
         m.update(p)
     return m.digest()
@@ -90,7 +91,7 @@ class TraceLog:
     every: int = EVERY
     window: tuple[int, int] | None = None     # (lo, hi]: record each step's state here
     step: int = 0
-    chain: bytes = field(default_factory=lambda: h(b"tdcc-exact/trace/v1"))
+    chain: bytes = field(default_factory=lambda: h(b"tdcc-exact/trace/v2"))
     checkpoints: list[Checkpoint] = field(default_factory=list)
     records: list[StepRecord] = field(default_factory=list)
     _words: dict = field(default_factory=dict)    # id(program) -> (program, encoded words)

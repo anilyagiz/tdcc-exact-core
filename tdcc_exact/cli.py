@@ -4,7 +4,8 @@
     tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json
     tdcc-exact verify --job job.json --receipt a.json
     tdcc-exact dispute --job job.json --trace b.trace.json [--replay-skip-layer K]
-    tdcc-exact demo [--model models/LFM2.5-230M]
+    tdcc-exact demo [--model models/LFM2.5-230M] [--devnet | --localnet]
+    tdcc-exact registry add --model tiny [--wformat int8 --cap 256]
 """
 from __future__ import annotations
 
@@ -13,10 +14,12 @@ import json
 import sys
 import time
 
+from . import registry
 from .backend import SkipLayer
+from .commit import check_reveal, commitment, new_salt
 from .dispute import bisect, first_fault
-from .oracle import (TINY, Job, Receipt, layers_of, load_model, load_trace, new_job, run_job,
-                     save_trace)
+from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
+                     model_name, new_job, run_job, save_trace)
 from .settle import accept, slash
 from .trace import EVERY, Checkpoint
 
@@ -41,16 +44,31 @@ def cmd_run(a) -> int:
     job = Job.load(a.job)
     model = load_model(job.model)
     r = run_job(job, a.provider, _cheat(a.skip_layer, model), a.every, model=model)
+    salt = new_salt()
+    c = commitment(bytes.fromhex(r.receipt.fingerprint), a.provider, salt)
+    r.receipt.extra.update(salt=salt.hex(), commitment=c.hex())   # salt: secret until reveal
     r.receipt.save(a.out)
     if a.trace:
         save_trace(r.log, a.trace)
     print(f"{a.provider}: {r.receipt.answer}  fingerprint {r.receipt.fingerprint}  "
           f"({r.receipt.steps} steps, {r.receipt.checkpoints} checkpoints)")
+    print(f"  commit {c.hex()}  (post this first; reveal fingerprint + salt after the window)")
     return 0
 
 
 def cmd_verify(a) -> int:
     job, rec = Job.load(a.job), Receipt.load(a.receipt)
+    if "commitment" in rec.extra and not check_reveal(
+            bytes.fromhex(rec.extra["commitment"]), bytes.fromhex(rec.fingerprint),
+            rec.provider, bytes.fromhex(rec.extra.get("salt", "00" * 32))):
+        print(f"{rec.provider}: REJECT  (the reveal does not open its commitment)")
+        return 1
+    why = registry.check(job, rec.model_hash)
+    if why is not None and "not registered" not in why:
+        print(f"{rec.provider}: REJECT  ({why})")
+        return 1
+    if why is not None:
+        print(f"warning: {why}; the re-run decides alone")
     r = run_job(job, "verifier", every=a.every)
     if a.trace:
         save_trace(r.log, a.trace)
@@ -96,6 +114,9 @@ def cmd_dispute(a) -> int:
 
 
 def cmd_demo(a) -> int:
+    if a.devnet or a.localnet:
+        from .chain_demo import run
+        return run(a)
     t0 = time.time()
 
     def say(*x):
@@ -136,6 +157,14 @@ def cmd_demo(a) -> int:
     return 0 if f is not None and ra.receipt.fingerprint == rv.receipt.fingerprint else 1
 
 
+def cmd_registry(a) -> int:
+    name = model_name(a.model)
+    hh = build_hash(a.model, a.wformat, a.cap)
+    registry.add(name, a.wformat, a.cap, hh, a.source or a.model)
+    print(f"{registry.key(name, a.wformat, a.cap)} -> {hh}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="tdcc-exact", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -165,6 +194,14 @@ def main(argv=None) -> int:
     v.add_argument("--every", type=int, default=EVERY)
     v.set_defaults(fn=cmd_verify)
 
+    g = sub.add_parser("registry", help="pin a model build's image hash (tdcc_exact/models.json)")
+    g.add_argument("action", choices=["add"])
+    g.add_argument("--model", required=True)
+    g.add_argument("--wformat", default="int8")
+    g.add_argument("--cap", type=int, default=256)
+    g.add_argument("--source", default="", help="where the checkpoint came from (revision)")
+    g.set_defaults(fn=cmd_registry)
+
     d = sub.add_parser("dispute", help="find the first instruction a provider's trace got wrong")
     d.add_argument("--job", required=True)
     d.add_argument("--trace", required=True, help="the provider's trace")
@@ -180,6 +217,14 @@ def main(argv=None) -> int:
     m.add_argument("--stake", type=int, default=50_000_000, help="USDC base units")
     m.add_argument("--every", type=int, default=EVERY)
     m.add_argument("--out", help="write the run's JSON here")
+    m.add_argument("--devnet", action="store_true",
+                   help="every step a Solana devnet transaction (pip install -e '.[chain]')")
+    m.add_argument("--localnet", action="store_true", help="the same on solana-test-validator")
+    m.add_argument("--rpc", help="RPC URL (default: the cluster's public one)")
+    m.add_argument("--commit-window", type=int, default=100,
+                   help="slots, for a market this run creates (the providers' run time)")
+    m.add_argument("--challenge-window", type=int, default=60,
+                   help="slots, for a market this run creates (the verifier's run time)")
     m.set_defaults(fn=cmd_demo)
 
     a = p.parse_args(argv)
