@@ -32,6 +32,28 @@ Compute runs off-chain. Money, proof and penalties live on Solana: the Anchor pr
 `HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A`) holds the escrow and the stakes, takes
 receipts by commit-reveal, and executes the transfers `tdcc_exact/settle.py` computes.
 
+## What TDCC Exact adds to openTPU
+
+Exact Core builds on [openTPU](https://github.com/FeSens/openTPU) (Apache-2.0, see
+[NOTICE](NOTICE)): its matrix and vector units, ISA, simulator, compiler and FPGA design. What
+TDCC Exact adds, in this repository:
+
+| Piece | Where |
+|:--|:--|
+| Trace log: a hash chain over every instruction, with checkpoints | [`tdcc_exact/trace.py`](tdcc_exact/trace.py) |
+| Oracle jobs, runs and receipts (fingerprint, trace root) | [`tdcc_exact/oracle.py`](tdcc_exact/oracle.py), [`tdcc_exact/backend.py`](tdcc_exact/backend.py) |
+| Commit-reveal receipts, against the copy attack | [`tdcc_exact/commit.py`](tdcc_exact/commit.py) |
+| Bisection dispute down to the first wrong instruction | [`tdcc_exact/dispute.py`](tdcc_exact/dispute.py) |
+| Settlement arithmetic, shared with the program | [`tdcc_exact/settle.py`](tdcc_exact/settle.py), [`tests/data/exact_settle_vectors.json`](tests/data/exact_settle_vectors.json) |
+| Model registry: a job pins the DRAM image its model runs as | [`tdcc_exact/registry.py`](tdcc_exact/registry.py), [`tdcc_exact/models.json`](tdcc_exact/models.json) |
+| The Solana program: escrow, stakes, receipts, challenge, slash, settle | [`programs/tdcc_exact`](programs/tdcc_exact) |
+| Chain client and the on-chain demo | [`tdcc_exact/chain.py`](tdcc_exact/chain.py), [`tdcc_exact/chain_demo.py`](tdcc_exact/chain_demo.py) |
+| The `tdcc-exact` command | [`tdcc_exact/cli.py`](tdcc_exact/cli.py) |
+| Tests | [`tests/test_exact.py`](tests/test_exact.py), [`tests/test_chain.py`](tests/test_chain.py) |
+
+Inside `opentpu/` the only change is an observer hook in `isasim.Machine.run`, which the trace
+log uses.
+
 ## Try the demo
 
 Runs on a laptop, no card, in about 10 seconds on the built-in tiny model:
