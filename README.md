@@ -85,7 +85,8 @@ hf download LiquidAI/LFM2.5-230M --local-dir models/LFM2.5-230M
 tdcc-exact demo --model models/LFM2.5-230M --question "Did it rain in Paris on 1 October 2026?"
 ```
 
-Step by step, as the market runs it:
+Step by step, as the market runs it ([recorded run](docs/media/tdcc-exact-demo.mp4), 26 s;
+`python tools/record_demo.py <workdir> <out.mp4>` records it again):
 
 ```sh
 tdcc-exact job new --model tiny --question "Will it rain tomorrow?" --id j1 --out job.json
