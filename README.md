@@ -107,6 +107,8 @@ tdcc-exact demo --localnet
    final: {'A': 'Settled', 'B': 'Slashed'}
 ```
 
+The program is deployed on devnet:
+[`HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A`](https://explorer.solana.com/address/HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A?cluster=devnet).
 On devnet the admin key needs about 1 SOL first (`tdcc-exact demo --devnet` prints its address
 when it has none; https://faucet.solana.com).
 

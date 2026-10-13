@@ -12,10 +12,9 @@ split, all on the bit-exact ISA simulator with a tiny random model (`tdcc-exact 
 
 ## P0: the demo in the deck (Solana devnet, LFM2.5-230M)
 
-### 1. The Solana program (built, tested on a local validator; devnet deploy pending)
-The deck's demo ends with "All in Solana Explorer". Nothing on-chain exists yet.
+### 1. The Solana program (built, tested on a local validator, deployed to devnet)
 - [x] Anchor workspace in `programs/tdcc_exact/` (Rust); program id in the README.
-- [ ] Deploy to devnet: needs ~2.5 SOL on the deployer key (the devnet airdrop is rate
+- [x] Deploy to devnet: needs ~2.5 SOL on the deployer key (the devnet airdrop is rate
       limited; https://faucet.solana.com), then
       `solana program deploy -ud target/deploy/tdcc_exact.so --program-id target/deploy/tdcc_exact-keypair.json`.
 - [x] Accounts: `Config` (fee 20%, verifier share 50%, challenge window, min stake),
