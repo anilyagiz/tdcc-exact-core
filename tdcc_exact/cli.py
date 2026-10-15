@@ -2,12 +2,16 @@
 
     tdcc-exact job new --model tiny --question "Did it rain?" --out job.json
     tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json
-    tdcc-exact verify --job job.json --receipt a.json
+                   [--skip-layer K] [--every N]
+    tdcc-exact verify --job job.json --receipt a.json [--trace F] [--json]
     tdcc-exact dispute --job job.json --trace b.trace.json [--receipt b.json]
                        [--replay-skip-layer K]
     tdcc-exact prove --trace b.trace.json --index 1
-    tdcc-exact demo [--model models/LFM2.5-230M] [--devnet | --localnet]
+    tdcc-exact demo [--model models/LFM2.5-230M] [--question Q] [--out run.json]
+                    [--devnet | --localnet] [--rpc URL]
     tdcc-exact registry add --model tiny [--wformat int8 --cap 256]
+
+Exit codes: 0 accepted / done, 1 a challenge or a lost dispute, 2 a bad file or argument.
 """
 from __future__ import annotations
 
