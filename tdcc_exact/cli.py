@@ -24,6 +24,7 @@ from . import registry
 from .backend import SkipLayer
 from .commit import check_reveal, commitment, new_salt
 from .dispute import bisect, first_fault, matches_root
+from .indexer import cmd_market
 from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
                      model_name, new_job, run_job, save_trace)
 from .settle import accept, slash
@@ -275,6 +276,14 @@ def main(argv=None) -> int:
     m.add_argument("--challenge-window", type=int, default=60,
                    help="slots, for a market this run creates (the verifier's run time)")
     m.set_defaults(fn=cmd_demo)
+
+    mk = sub.add_parser("market", help="watch the Solana market: a snapshot, or its events")
+    mk.add_argument("action", choices=["status", "events"])
+    mk.add_argument("--rpc", help="RPC URL (default: $TDCC_EXACT_RPC, else devnet)")
+    mk.add_argument("--admin", help="status: only this admin's market")
+    mk.add_argument("--limit", type=int, default=100, help="events: the last N transactions")
+    mk.add_argument("--json", action="store_true")
+    mk.set_defaults(fn=cmd_market)
 
     a = p.parse_args(argv)
     try:
