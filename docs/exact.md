@@ -10,22 +10,30 @@ observer hook in `isasim.Machine.run`, called after each instruction a slice ste
 
 ## 1. The trace log (`tdcc_exact/trace.py`)
 
+The chain starts from `H("tdcc-exact/trace/v3" || binding)`: the binding is the on-chain Job
+account's address (locally, the provider's key), so every run is tied to one job and a
+fingerprint revealed on one job is worthless on another, even for the same question and model.
+
 Every instruction the simulator steps extends a hash chain (SHA-256, the hash Solana's runtime offers as a syscall):
 
     chain = H(chain || slice || pc || the instruction's 8 words || R0..R15 after it)
 
-Every 4096 steps, and when each device run ends, the log takes a checkpoint: a hash of each
-slice's working state (TMEM, the ACT RAM and its scales, the registers, the pc), folded into
-the chain. A checkpoint's leaf is `H(step || chain || state)`, and the trace root is the
+Every `job.every` steps (4096 by default; the interval is part of the job, so provider and
+verifier checkpoint alike), and when each device run ends, the log takes a checkpoint: a hash
+of each slice's working state (TMEM, the ACT RAM and its scales, the registers, the pc, and a
+running hash of what its stores wrote to DRAM), folded into the chain. A checkpoint's leaf is `H(step || chain || state)`, and the trace root is the
 Merkle root of the leaves with their count hashed on top (`H(2 || count || root)`), so a list
 with its last checkpoint repeated does not share the root.
 
-The host's writes into DRAM between runs (the token, its embedding row) and each run's
-arguments go into the chain too, so the log covers the inputs as well as the work.
+The host's writes into DRAM between runs (the token, its embedding row), each run's arguments
+and what the host reads back (the logits) go into the chain too, so the log covers the inputs,
+the work and the output: a receipt whose answer or logits are not the ones its trace read is
+an output fault in a dispute.
 
-DRAM is not hashed at checkpoints: the 4 GiB card's weights would dominate, and they are
-pinned by the model hash instead. What a run stores to DRAM it stores from TMEM, and what it
-loads back lands in TMEM, so a wrong value is caught there.
+DRAM itself is not hashed at checkpoints (the card's weights would dominate; the model hash
+pins them). What runs store to DRAM is: each slice keeps a running hash of the words and bytes
+its ST, QST and DSTEP instructions wrote, and that hash is part of its state, so a run whose
+only wrong value is a final store is still caught at the store.
 
 ## 2. The receipt (`tdcc_exact/oracle.py`)
 
@@ -53,7 +61,7 @@ The job's prompt is the chat template with a system line ("Answer with exactly o
 or No.") and the question. In LFM2.5's tokenizer "Yes" (12948) and "No" (5048) are one token
 each; a tokenizer that splits them would use the first token of each (`new_job`).
 
-## 3. The dispute (`tdcc_exact/dispute.py`)
+## 3. The dispute (`tdcc_exact/dispute.py`, `tdcc_exact/verifier.py`)
 
 0. **The posted trace.** The provider plays on the checkpoint list its receipt committed to:
    `tdcc-exact dispute --receipt` checks the list against the posted trace root
@@ -69,7 +77,14 @@ each; a tokenizer that splits them would use the first token of each (`new_job`)
 2. **Replay.** Both sides replay that window and record each step: where it ran, its
    encoding, the chain, and a hash of the slice's state. The first record that differs is the
    fault: `control` if a different instruction ran, `state` if the same one gave a different
-   result.
+   result. A provider's revealed window must chain: `verify_window` replays the chain from the
+   agreed checkpoint through every record (steps with their registers, host writes and reads,
+   run starts, and the closing checkpoint with each slice's state) and the provider loses if
+   it does not reach the checkpoint it posted.
+3. **Output.** If the traces agree, the receipt must still be the one the trace gives: the
+   answer, the logits hash and the model hash of the verifier's re-run, a trace root that is
+   the root of the posted checkpoints, and a fingerprint that is its own fields' hash.
+   Otherwise the fault is `output`.
 
 Provider B (`SkipLayer`) skips one layer's matrix multiplies, its mixer's (attention, or
 LFM2's short convolution) and its MLP's, in every run. The layers repeat inside a hardware
@@ -78,7 +93,7 @@ the program runs for several layers. B tells them apart by the compiler's source
 (`Instr.src`: `_conv*` / `_attention*` / `_mlp`) and counts layers as they run: a mixer MM
 after an MLP MM starts the next layer.
 
-On the tiny model the dispute names the first skipped `MM` in 2 rounds over 3 checkpoints. On
+On the tiny model the dispute names the first skipped `MM` in 2 rounds over 4 checkpoints. On
 LFM2.5-230M (skipping layer 7, a conv layer: 88 MMs a run, 440 over the job's 5 runs) it
 names it in 5 rounds over 21 checkpoints: `mm 8x1024 . 512x1024^T`, step 7166 of 66862.
 
@@ -103,14 +118,23 @@ the program compute the same numbers, and both are tested against
   (`tdcc_exact/commit.py`): first `SHA-256("tdcc-exact/commit/v1" || fingerprint || provider
   key || salt)`, then, after the commit deadline, the fingerprint and the salt. A commitment
   binds its provider's key, and by the time fingerprints are public the commit window is shut.
+  `tdcc-exact run` keeps the salt out of the shared receipt, in a private file (`<out>.salt`,
+  mode 0600) revealed only with the fingerprint.
+- **Replay across jobs.** Commit-reveal protects one job; two jobs with the same question
+  would still share a fingerprint. Every job has a random nonce in its digest and every run is
+  bound to its on-chain job (section 1), so a fingerprint revealed on one job does not fit
+  another, even when a renter opens the same job with several providers.
 - **Digest size.** Every hash is SHA-256 (32 bytes): 128-bit collision resistance, and the
   hash Solana's runtime computes as a syscall, so the program can check commitments (and,
   later, Merkle paths of the trace).
 - **Model identity.** The model hash is the hash of the DRAM image the engine builds, which
   depends on the build (weight format, KV cache size, design config) as well as the weights.
-  `tdcc_exact/models.json` pins `(model, wformat, cap) -> image hash`
-  (`tdcc-exact registry add --model ...`); `verify` rejects a receipt with another hash before
-  re-running anything, and the program rejects a reveal whose model hash is not the job's. A
+  `tdcc_exact/models.json` pins `(model, wformat, cap) -> image hash`, and a user registry
+  (`tdcc-exact registry add --model ...`, `$TDCC_EXACT_REGISTRY` or
+  `~/.config/tdcc-exact/models.json`) adds pins over it; `run_job` refuses a build whose image
+  is not the pinned one (an `OTPU_*` setting that changes the formats, say), `verify` rejects
+  a receipt with another hash before re-running anything (`--strict`: an unregistered model
+  too), and the program rejects a reveal whose model hash is not the job's. A
   provider that runs fp4 instead of int8 is caught there (`tests/test_exact.py`, with the
   other cheats tested: other weights, skipped prompt tokens, an answer with no run).
 - **The verdict.** `tdcc-exact verify` gives ACCEPT, CHALLENGE (naming the fields that
