@@ -224,3 +224,16 @@ def test_the_slash_names_a_checkpoint_the_receipt_has(world):
     with pytest.raises(ChainError, match="BadParams"):
         m.slash(job, 4, 1234)
     m.dismiss(job)
+
+
+@pytest.mark.parametrize("bad", [dict(commit_window=0), dict(challenge_window=0),
+                                 dict(min_stake=0)])
+def test_a_market_needs_windows_and_a_stake(world, bad):
+    """A zero commit window leaves no slot to reveal in, a zero challenge window no slot to
+    challenge in, and a zero minimum stake lets unstaked providers take jobs."""
+    import dataclasses
+    rpc, admin = world["rpc"], Keypair()
+    rpc.airdrop(admin.pubkey(), 2_000_000_000)
+    m = Market(rpc, admin, "localnet")
+    with pytest.raises(ChainError, match="BadParams"):
+        m.initialize(Keypair().pubkey(), dataclasses.replace(Params(), **bad))

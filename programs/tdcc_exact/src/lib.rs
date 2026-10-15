@@ -74,6 +74,12 @@ pub mod tdcc_exact {
             params.verifier_bps as u64 <= math::BPS,
             ExactError::BadParams
         );
+        // a zero window leaves no slot to reveal or to challenge in; a zero minimum stake
+        // lets providers with nothing at stake take jobs
+        require!(
+            params.commit_window > 0 && params.challenge_window > 0 && params.min_stake > 0,
+            ExactError::BadParams
+        );
         let c = &mut ctx.accounts.config;
         c.admin = ctx.accounts.admin.key();
         c.mint = ctx.accounts.mint.key();
