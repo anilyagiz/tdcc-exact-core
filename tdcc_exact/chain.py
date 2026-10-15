@@ -242,6 +242,7 @@ class JobAccount:
     bond: int
     challenge_slot: int
     ruling_deadline: int
+    answer: int                  # 0 NO, 1 YES, 255 not revealed yet
 
     @staticmethod
     def decode(d: bytes) -> "JobAccount":
@@ -263,9 +264,10 @@ class JobAccount:
         cps = struct.unpack("<I", take(4))[0]
         verifier, vfp = pk(), take(32)
         bond, chs, rul = q(), q(), q()
+        answer = take(1)[0]
         return JobAccount(config, renter, provider, job_id, digest, model, price, state,
                           opened, cd, rd, chd, commitment, fp, root, cps, verifier, vfp, bond,
-                          chs, rul)
+                          chs, rul, answer)
 
 
 @dataclass
@@ -282,6 +284,47 @@ class ProviderAccount:
         owner = Pubkey.from_bytes(d[8:40])
         stake, open_jobs, unlock = struct.unpack("<QIQ", d[40:60])
         return ProviderAccount(owner, stake, open_jobs, unlock)
+
+
+# ------------------------------------------------------------------------------- receipts
+# What reveal_receipt checks (programs/tdcc_exact: trace_root, receipt_fingerprint).
+def _h(*parts: bytes) -> bytes:
+    return hashlib.sha256(b"".join(parts)).digest()
+
+
+def tree_root(leaves: list[bytes]) -> bytes:
+    """The checkpoints' Merkle tree root, below tdcc_exact.trace.merkle_root's count on top
+    (leaves H(0x00 || leaf), nodes H(0x01 || l || r), an odd level's last node doubled)."""
+    if not leaves:
+        raise ValueError("a receipt has at least one checkpoint")
+    level = [_h(b"\x00", x) for x in leaves]
+    while len(level) > 1:
+        if len(level) % 2:
+            level.append(level[-1])
+        level = [_h(b"\x01", level[i], level[i + 1]) for i in range(0, len(level), 2)]
+    return level[0]
+
+
+def trace_root(tree: bytes, checkpoints: int) -> bytes:
+    """H(0x02 || count (u64 LE) || tree root): the trace root a receipt posts."""
+    return _h(b"\x02", u64(checkpoints), b32(tree))
+
+
+def answer_code(answer) -> int:
+    """"YES"/"NO" (a receipt's), True/False or 1/0 -> the program's u8."""
+    if isinstance(answer, str):
+        if answer not in ("YES", "NO"):
+            raise ValueError(f"answer {answer!r} is not YES or NO")
+        return int(answer == "YES")
+    return int(answer)
+
+
+def receipt_fingerprint(job_digest: bytes, model_hash: bytes, answer, logits_hash: bytes,
+                        trace: bytes) -> bytes:
+    """H(job digest || model hash || "YES"/"NO" || logits hash || trace root), as
+    tdcc_exact.oracle computes it."""
+    word = b"YES" if answer_code(answer) == 1 else b"NO"
+    return _h(b32(job_digest), b32(model_hash), word, b32(logits_hash), b32(trace))
 
 
 def ata(owner: Pubkey, mint: Pubkey) -> Pubkey:
@@ -468,16 +511,31 @@ class Market:
                                        b32(commitment))], owner)
 
     def reveal_ix(self, owner: Pubkey, job: Pubkey, fingerprint: bytes, salt: bytes,
-                  model_hash: bytes, trace_root: bytes, checkpoints: int) -> Instruction:
-        data = b32(fingerprint) + b32(salt) + b32(model_hash) + b32(trace_root) + u32(checkpoints)
+                  model_hash: bytes, answer, logits_hash: bytes, tree: bytes,
+                  checkpoints: int) -> Instruction:
+        data = (b32(fingerprint) + b32(salt) + b32(model_hash) + u8(answer_code(answer))
+                + b32(logits_hash) + b32(tree) + u32(checkpoints))
         return self._ix("reveal_receipt",
                         [S(owner), R(self.config), W(job), R(self.provider_pda(owner))], data)
 
     def reveal_receipt(self, owner: Keypair, job: Pubkey, fingerprint: bytes, salt: bytes,
-                       model_hash: bytes, trace_root: bytes, checkpoints: int) -> str:
-        """Open the commitment (the provider must still hold the minimum stake)."""
+                       model_hash: bytes, answer, logits_hash: bytes, tree: bytes,
+                       checkpoints: int) -> str:
+        """Open the commitment with the receipt's parts: the program rebuilds the trace root
+        from `tree` (tree_root of the checkpoints' leaves) and the count, and the fingerprint
+        from those parts (the provider must also still hold the minimum stake)."""
         return self.rpc.send([self.reveal_ix(owner.pubkey(), job, fingerprint, salt, model_hash,
-                                             trace_root, checkpoints)], owner)
+                                             answer, logits_hash, tree, checkpoints)], owner)
+
+    def reveal_run(self, owner: Keypair, job: Pubkey, receipt, leaves: list[bytes],
+                   salt: bytes) -> str:
+        """reveal_receipt from an oracle Receipt and its trace's checkpoint leaves."""
+        tree = tree_root(leaves)
+        if trace_root(tree, len(leaves)).hex() != receipt.trace_root:
+            raise ChainError("the leaves are not the receipt's trace")
+        return self.reveal_receipt(owner, job, bytes.fromhex(receipt.fingerprint), salt,
+                                   bytes.fromhex(receipt.model_hash), receipt.answer,
+                                   bytes.fromhex(receipt.logits_hash), tree, len(leaves))
 
     def challenge_ix(self, verifier: Pubkey, job: Pubkey, fingerprint: bytes) -> Instruction:
         return self._ix("challenge",

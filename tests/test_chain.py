@@ -16,7 +16,8 @@ solders = pytest.importorskip("solders")
 
 from solders.keypair import Keypair  # noqa: E402
 
-from tdcc_exact.chain import ChainError, Market, Params, Rpc, ata  # noqa: E402
+from tdcc_exact.chain import (ChainError, Market, Params, Rpc, ata,  # noqa: E402
+                              receipt_fingerprint, trace_root)
 from tdcc_exact.commit import commitment  # noqa: E402
 from tdcc_exact.settle import accept, dismiss, expire, slash  # noqa: E402
 
@@ -95,11 +96,21 @@ def _open(w, provider):
     return job
 
 
-def _post(w, provider, job, fp, model=MODEL):
+def _receipt(m, job, seed: bytes, model=MODEL, answer="YES", cps=3):
+    """A receipt the program accepts for `job`: (fingerprint, the reveal's arguments after the
+    salt). `seed` stands in for both the logits hash and the trace's tree root."""
+    fp = receipt_fingerprint(m.job(job).job_digest, model, answer, seed, trace_root(seed, cps))
+    return fp, (model, answer, seed, seed, cps)
+
+
+def _post(w, provider, job, seed, model=MODEL):
+    """Commit and reveal a receipt made from `seed`; its fingerprint."""
     m, salt = w["m"], os.urandom(32)
+    fp, args = _receipt(m, job, seed, model)
     m.commit_receipt(provider, job, commitment(fp, bytes(provider.pubkey()), salt))
     w["rpc"].wait_slot(m.job(job).commit_deadline)
-    m.reveal_receipt(provider, job, fp, salt, model, bytes(32), 3)
+    m.reveal_receipt(provider, job, fp, salt, *args)
+    return fp
 
 
 def test_honest_job_settles_80_20(world):
@@ -155,20 +166,21 @@ def test_a_copied_commitment_does_not_reveal(world):
     m.commit_receipt(w["a"], job, copied)
     w["rpc"].wait_slot(m.job(job).commit_deadline)
     with pytest.raises(ChainError, match="BadReveal"):
-        m.reveal_receipt(w["a"], job, fp, salt, MODEL, bytes(32), 3)
+        m.reveal_receipt(w["a"], job, fp, salt, MODEL, "YES", fp, fp, 3)
 
 
 def test_reveal_waits_for_the_commit_window_and_needs_the_job_model(world):
     w, m = world, world["m"]
     job = _open(w, w["a"])
-    fp, salt = b"\x06" * 32, os.urandom(32)
+    salt = os.urandom(32)
+    fp, args = _receipt(m, job, b"\x06" * 32)
     m.commit_receipt(w["a"], job, commitment(fp, bytes(w["a"].pubkey()), salt))
     with pytest.raises(ChainError, match="WindowOpen"):                 # too early: others could still copy
-        m.reveal_receipt(w["a"], job, fp, salt, MODEL, bytes(32), 3)
+        m.reveal_receipt(w["a"], job, fp, salt, *args)
     w["rpc"].wait_slot(m.job(job).commit_deadline)
     with pytest.raises(ChainError, match="ModelMismatch"):                 # another model image (fp4 for int8)
-        m.reveal_receipt(w["a"], job, fp, salt, bytes(32), bytes(32), 3)
-    m.reveal_receipt(w["a"], job, fp, salt, MODEL, bytes(32), 3)
+        m.reveal_receipt(w["a"], job, fp, salt, bytes(32), *args[1:])
+    m.reveal_receipt(w["a"], job, fp, salt, *args)
 
 
 def test_wrong_signer_cannot_commit_for_a_provider(world):
@@ -518,18 +530,75 @@ def test_a_slashed_provider_cannot_reveal_its_other_jobs(world):
     w, m, rpc = world, world["m"], world["rpc"]
     d = _provider(w)
     j1, j2 = _open(w, d), _open(w, d)
-    fp, salts = b"\x1f" * 32, (os.urandom(32), os.urandom(32))
-    for j, salt in zip((j1, j2), salts):
+    salts = (os.urandom(32), os.urandom(32))
+    (f1, a1), (f2, a2) = (_receipt(m, j, b"\x1f" * 32) for j in (j1, j2))
+    for j, fp, salt in zip((j1, j2), (f1, f2), salts):
         m.commit_receipt(d, j, commitment(fp, bytes(d.pubkey()), salt))
     rpc.wait_slot(max(m.job(j).commit_deadline for j in (j1, j2)))
-    rpc.send([m.reveal_ix(d.pubkey(), j1, fp, salts[0], MODEL, bytes(32), 3),
+    rpc.send([m.reveal_ix(d.pubkey(), j1, f1, salts[0], *a1),
               m.challenge_ix(w["verifier"].pubkey(), j1, b"\x20" * 32),
               m.slash_ix(j1, w["renter"].pubkey(), d.pubkey(), w["verifier"].pubkey(), 1, 7)],
              w["admin"], d, w["verifier"], w["arbiter"])
     assert m.provider(d.pubkey()).stake == 0
     with pytest.raises(ChainError, match="ProviderNotStaked"):
-        m.reveal_receipt(d, j2, fp, salts[1], MODEL, bytes(32), 3)
+        m.reveal_receipt(d, j2, f2, salts[1], *a2)
     rpc.wait_slot(m.job(j2).reveal_deadline)
     r0 = m.balance(w["renter"].pubkey())
     m.expire(w["renter"], j2)
     assert m.balance(w["renter"].pubkey()) - r0 == PRICE
+
+
+def test_the_reveal_binds_the_answer_and_the_checkpoint_count(world):
+    """The fingerprint is checked against its parts: a reveal that changes the answer, the
+    logits hash or the checkpoint count (or names no answer) is refused; the accepted one
+    stores the answer and the trace root rebuilt from the tree root and the count."""
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    seed, salt = b"\x21" * 32, os.urandom(32)
+    fp, (model, answer, logits, tree, cps) = _receipt(m, job, seed, answer="NO", cps=5)
+    m.commit_receipt(w["a"], job, commitment(fp, bytes(w["a"].pubkey()), salt))
+    assert m.job(job).answer == 255                                   # nothing revealed yet
+    w["rpc"].wait_slot(m.job(job).commit_deadline)
+    for bad in (("YES", logits, tree, cps), ("NO", bytes(32), tree, cps),
+                ("NO", logits, tree, cps + 1), ("NO", logits, bytes(32), cps)):
+        with pytest.raises(ChainError, match="BadReceipt"):
+            m.reveal_receipt(w["a"], job, fp, salt, model, *bad)
+    with pytest.raises(ChainError, match="BadParams"):                 # 0 = NO, 1 = YES only
+        m.reveal_receipt(w["a"], job, fp, salt, model, 2, logits, tree, cps)
+    sig = m.reveal_receipt(w["a"], job, fp, salt, model, answer, logits, tree, cps)
+    j = m.job(job)
+    assert (j.state, j.answer, j.checkpoints) == ("Revealed", 0, 5)
+    assert j.trace_root == trace_root(tree, cps)
+    from tdcc_exact.indexer import events_from_logs
+    tx = w["rpc"].call("getTransaction", sig, {"encoding": "json", "commitment": "confirmed",
+                                               "maxSupportedTransactionVersion": 0})
+    ev = [e for e in events_from_logs(tx["meta"]["logMessages"])
+          if e["name"] == "ReceiptRevealed"]
+    assert (ev[0]["answer"], ev[0]["logits_hash"]) == (0, logits.hex())
+
+
+def test_a_real_run_reveals(world):
+    """A receipt from tdcc_exact.oracle (the tiny model) reveals as it is: the client's
+    tree_root/trace_root/receipt_fingerprint are the oracle's and the program's."""
+    from tdcc_exact.chain import tree_root
+    from tdcc_exact.oracle import fingerprint, new_job, run_job
+    w, m = world, world["m"]
+    job = new_job("tiny", "Is it raining?", "chain")
+    key = m.job_pda(w["renter"].pubkey(), w["next"][0])
+    run = run_job(job, "A", binding=bytes(key))
+    r = run.receipt
+    assert fingerprint(job, r) == r.fingerprint
+    leaves = [c.leaf for c in run.log.checkpoints]
+    assert trace_root(tree_root(leaves), len(leaves)).hex() == r.trace_root
+    jid = w["next"][0]
+    w["next"][0] += 1
+    onchain, _ = m.open_job(w["renter"], w["a"].pubkey(), jid, job.digest,
+                            bytes.fromhex(r.model_hash), PRICE)
+    assert onchain == key
+    salt = os.urandom(32)
+    m.commit_receipt(w["a"], onchain, commitment(bytes.fromhex(r.fingerprint),
+                                                 bytes(w["a"].pubkey()), salt))
+    w["rpc"].wait_slot(m.job(onchain).commit_deadline)
+    m.reveal_run(w["a"], onchain, r, leaves, salt)
+    j = m.job(onchain)
+    assert j.fingerprint.hex() == r.fingerprint and j.answer == (r.answer == "YES")

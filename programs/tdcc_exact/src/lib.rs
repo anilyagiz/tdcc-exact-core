@@ -68,6 +68,28 @@ pub mod math {
     }
 }
 
+/// A job's `answer` before its receipt is revealed (then 0 = NO, 1 = YES).
+pub const NO_ANSWER: u8 = u8::MAX;
+
+/// The posted trace root: SHA-256(0x02 || checkpoint count (u64 LE) || Merkle tree root), as
+/// the top of tdcc_exact.trace.merkle_root, so the count a receipt names is bound to the tree.
+pub fn trace_root(tree_root: &[u8; 32], checkpoints: u32) -> [u8; 32] {
+    hashv(&[&[2u8], &(checkpoints as u64).to_le_bytes(), tree_root]).to_bytes()
+}
+
+/// SHA-256(job digest || model hash || "YES" or "NO" || logits hash || trace root): the
+/// receipt's fingerprint as tdcc_exact.oracle.run_job (and oracle.fingerprint) computes it.
+pub fn receipt_fingerprint(
+    job_digest: &[u8; 32],
+    model_hash: &[u8; 32],
+    answer: u8,
+    logits_hash: &[u8; 32],
+    trace_root: &[u8; 32],
+) -> [u8; 32] {
+    let word: &[u8] = if answer == 1 { b"YES" } else { b"NO" };
+    hashv(&[job_digest, model_hash, word, logits_hash, trace_root]).to_bytes()
+}
+
 /// SHA-256(tag || fingerprint || provider || salt), as tdcc_exact.commit.commitment.
 pub fn commitment(fingerprint: &[u8; 32], provider: &Pubkey, salt: &[u8; 32]) -> [u8; 32] {
     hashv(&[COMMIT_TAG, fingerprint, provider.as_ref(), salt]).to_bytes()
@@ -272,6 +294,7 @@ pub mod tdcc_exact {
         j.bond = 0;
         j.challenge_slot = 0;
         j.ruling_deadline = 0;
+        j.answer = NO_ANSWER;
         j.bump = ctx.bumps.job;
         let p = &mut ctx.accounts.provider;
         p.open_jobs = p.open_jobs.checked_add(1).ok_or(ExactError::Overflow)?;
@@ -301,12 +324,19 @@ pub mod tdcc_exact {
         Ok(())
     }
 
+    /// Open the commitment and post the receipt. The fingerprint is checked against the parts
+    /// it hashes (the job's digest, its model hash, the answer, the logits hash and the trace
+    /// root, itself rebuilt from the tree root and the checkpoint count), so the answer and the
+    /// checkpoint count on chain are the ones the fingerprint commits to.
+    #[allow(clippy::too_many_arguments)]
     pub fn reveal_receipt(
         ctx: Context<RevealReceipt>,
         fingerprint: [u8; 32],
         salt: [u8; 32],
         model_hash: [u8; 32],
-        trace_root: [u8; 32],
+        answer: u8,
+        logits_hash: [u8; 32],
+        tree_root: [u8; 32],
         checkpoints: u32,
     ) -> Result<()> {
         let challenge_window = ctx.accounts.config.challenge_window;
@@ -328,9 +358,17 @@ pub mod tdcc_exact {
             ExactError::BadReveal
         );
         require!(model_hash == j.model_hash, ExactError::ModelMismatch);
+        require!(answer <= 1, ExactError::BadParams);
+        let trace_root = trace_root(&tree_root, checkpoints);
+        require!(
+            receipt_fingerprint(&j.job_digest, &model_hash, answer, &logits_hash, &trace_root)
+                == fingerprint,
+            ExactError::BadReceipt
+        );
         j.fingerprint = fingerprint;
         j.trace_root = trace_root;
         j.checkpoints = checkpoints;
+        j.answer = answer;
         j.state = JobState::Revealed;
         j.challenge_deadline = now
             .checked_add(challenge_window)
@@ -339,7 +377,9 @@ pub mod tdcc_exact {
             job: j.key(),
             fingerprint,
             trace_root,
-            checkpoints
+            checkpoints,
+            answer,
+            logits_hash
         });
         Ok(())
     }
@@ -727,6 +767,7 @@ pub struct Job {
     pub bond: u64, // the challenger's bond, held in the vault while Challenged
     pub challenge_slot: u64,
     pub ruling_deadline: u64, // challenge_slot + arbiter_window
+    pub answer: u8,           // the revealed receipt's: 0 = NO, 1 = YES (NO_ANSWER before)
     pub bump: u8,
 }
 
@@ -1021,6 +1062,8 @@ pub struct ReceiptRevealed {
     pub fingerprint: [u8; 32],
     pub trace_root: [u8; 32],
     pub checkpoints: u32,
+    pub answer: u8, // 0 = NO, 1 = YES
+    pub logits_hash: [u8; 32],
 }
 
 #[event]
@@ -1090,6 +1133,8 @@ pub enum ExactError {
     ArbiterWindowOpen,
     #[msg("the arbiter may not challenge a job it rules on")]
     ArbiterChallenger,
+    #[msg("the fingerprint is not the hash of the receipt's parts")]
+    BadReceipt,
 }
 
 #[cfg(test)]
@@ -1118,6 +1163,27 @@ mod tests {
                 (c["verifier"].as_u64().unwrap(), c["tdcc"].as_u64().unwrap())
             );
         }
+    }
+
+    #[test]
+    fn receipt_hashes_match_the_python_side() {
+        // python: trace.h(b"\x02", (7).to_bytes(8, "little"), b"\x44" * 32), then
+        // oracle's h(digest, model, b"YES" / b"NO", logits, that root)
+        let hex = |b: [u8; 32]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let root = trace_root(&[0x44; 32], 7);
+        assert_eq!(
+            hex(root),
+            "10e629465c22f5a84f97dc634bc92e5f8319d195d9858e9cc3ec4124f36ce793"
+        );
+        let (d, m, l) = ([0x11; 32], [0x22; 32], [0x33; 32]);
+        assert_eq!(
+            hex(receipt_fingerprint(&d, &m, 1, &l, &root)),
+            "2bf416e54eef03080ce22d4cba4d261bad90021cd5c4d54e152393fed1b0a6a5"
+        );
+        assert_eq!(
+            hex(receipt_fingerprint(&d, &m, 0, &l, &root)),
+            "328580f9b7f7b3ab6f7e55200ce7aa6a5f14e9d806fb52397625d41916d9b24c"
+        );
     }
 
     #[test]

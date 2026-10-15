@@ -97,9 +97,11 @@ class Chain:
         return self.m.commit_receipt(owner, job, commitment)
 
     def reveal(self, owner, job, fingerprint: bytes, salt: bytes, model_hash: bytes,
-               trace_root: bytes, checkpoints: int) -> str:
-        return self.m.reveal_receipt(owner, job, fingerprint, salt, model_hash, trace_root,
-                                     checkpoints)
+               answer: str, logits_hash: bytes, tree_root: bytes, checkpoints: int) -> str:
+        """The program checks the fingerprint against these parts (tree_root: the checkpoints'
+        Merkle tree below the count, chain.tree_root)."""
+        return self.m.reveal_receipt(owner, job, fingerprint, salt, model_hash, answer,
+                                     logits_hash, tree_root, checkpoints)
 
     def challenge(self, verifier, job, fingerprint: bytes) -> str:
         return self.m.challenge(verifier, job, fingerprint)

@@ -161,7 +161,8 @@ JOB = [("config", "pubkey"), ("renter", "pubkey"), ("provider", "pubkey"),
        ("fingerprint", "bytes32"), ("trace_root", "bytes32"),
        ("checkpoints", "u32"), ("verifier", "pubkey"),
        ("verifier_fingerprint", "bytes32"), ("bond", "u64"),
-       ("challenge_slot", "u64"), ("ruling_deadline", "u64"), ("bump", "u8")]
+       ("challenge_slot", "u64"), ("ruling_deadline", "u64"), ("answer", "u8"),
+       ("bump", "u8")]
 
 
 def _job(state: int, price: int, opened: int, reveal: int, challenge: int, seed: int) -> bytes:
@@ -272,11 +273,14 @@ def test_validator_flow_is_indexed():
     m.mint_to(verifier.pubkey(), Params().challenge_bond)
     model = b"\x07" * 32
 
-    def post(job, fp):
+    def post(job, seed):
+        from tdcc_exact.chain import receipt_fingerprint, trace_root
+        fp = receipt_fingerprint(m.job(job).job_digest, model, "YES", seed,
+                                 trace_root(b"\x0a" * 32, 3))
         salt = os.urandom(32)
         m.commit_receipt(prov, job, commitment(fp, bytes(prov.pubkey()), salt))
         rpc.wait_slot(m.job(job).commit_deadline)
-        m.reveal_receipt(prov, job, fp, salt, model, b"\x0a" * 32, 3)
+        m.reveal_receipt(prov, job, fp, salt, model, "YES", seed, b"\x0a" * 32, 3)
 
     j1, _ = m.open_job(renter, prov.pubkey(), 1, b"\x01" * 32, model, 2_000_000)
     post(j1, b"\x11" * 32)
@@ -321,7 +325,8 @@ def test_validator_flow_is_indexed():
         "Challenged", "Dismissed", "Settled", "JobOpened", "ReceiptCommitted",
         "ReceiptRevealed", "JobOpened", "Expired"]
     assert mine[1]["stake"] == 20_000_000 and mine[2]["price"] == 2_000_000
-    assert mine[4]["fingerprint"] == "11" * 32 and mine[4]["checkpoints"] == 3
+    assert mine[4]["logits_hash"] == "11" * 32 and mine[4]["checkpoints"] == 3
+    assert mine[4]["answer"] == 1 and mine[4]["fingerprint"] == m.job(j1).fingerprint.hex()
     assert mine[5]["verifier"] == str(verifier.pubkey())
     assert (mine[7]["host"], mine[7]["fee"]) == (1_600_000, 400_000)
     assert (mine[12]["renter"], mine[12]["refunded"]) == (str(renter.pubkey()), 1_000_000)

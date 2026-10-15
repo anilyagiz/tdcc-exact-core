@@ -122,7 +122,8 @@ class ProviderNode:
                 return "missed"
             sig = self.chain.reveal(self.owner, key, bytes.fromhex(s["fingerprint"]),
                                     bytes.fromhex(s["salt"]), bytes.fromhex(s["model_hash"]),
-                                    bytes.fromhex(s["trace_root"]), s["checkpoints"])
+                                    s["answer"], bytes.fromhex(s["logits_hash"]),
+                                    bytes.fromhex(s["tree_root"]), s["checkpoints"])
             self.state.set(k, status="revealed", reveal_sig=sig)
             self.log(f"{k[:8]}: revealed {s['fingerprint'][:16]}..  {sig}")
             return self._publish(k, s) or "revealed"
@@ -167,11 +168,14 @@ class ProviderNode:
         self.traces.mkdir(parents=True, exist_ok=True)
         tf = self.traces / f"{r.trace_root}.json"
         tf.write_text(json.dumps(res.log.to_json()))
+        from ..chain import tree_root
+        tree = tree_root([c.leaf for c in res.log.checkpoints])   # what the reveal posts
         salt = new_salt()
         fp = bytes.fromhex(r.fingerprint)
         c = commitment(fp, bytes(self.owner.pubkey()), salt)
         return self.state.set(k, status="prepared", answer=r.answer, fingerprint=r.fingerprint,
                               model_hash=r.model_hash, trace_root=r.trace_root,
+                              logits_hash=r.logits_hash, tree_root=tree.hex(),
                               checkpoints=r.checkpoints, salt=salt.hex(), commitment=c.hex(),
                               trace_file=str(tf), job_digest=j.job_digest.hex())
 

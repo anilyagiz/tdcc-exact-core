@@ -153,12 +153,15 @@ class FakeChain:
         self.sent.append(("commit", key))
         return f"sig-commit-{len(self.sent)}"
 
-    def reveal(self, owner, key, fp, salt, model_hash, root, cps):
+    def reveal(self, owner, key, fp, salt, model_hash, answer, logits_hash, tree, cps):
+        from tdcc_exact.chain import receipt_fingerprint, trace_root
         from tdcc_exact.commit import commitment
         j = self.jobs_[key]
         assert j.state == "Committed" and j.commit_deadline < self.now <= j.reveal_deadline
         assert commitment(fp, bytes(owner.pubkey()), salt) == j.commitment
         assert model_hash == j.model_hash
+        root = trace_root(tree, cps)                       # what the program checks
+        assert receipt_fingerprint(j.job_digest, model_hash, answer, logits_hash, root) == fp
         j.fingerprint, j.trace_root, j.checkpoints, j.state = fp, root, cps, "Revealed"
         j.challenge_deadline = self.now + 10
         self.sent.append(("reveal", key))

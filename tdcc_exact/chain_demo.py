@@ -69,7 +69,7 @@ def run(a) -> int:
 
     # ------------------------------------------------------------------ 1. jobs
     question, model_id = a.question, a.model
-    job = new_job(model_id, question, "demo")
+    job = new_job(model_id, question, "demo", every=a.every)
     model = load_model(model_id)
     want = registry.expected(model_name(model_id), job.wformat, job.cap)
     model_hash = bytes.fromhex(want or build_hash(model_id, job.wformat, job.cap, model))
@@ -87,8 +87,11 @@ def run(a) -> int:
     L = layers_of(model[0])
     layer = a.skip_layer if a.skip_layer is not None else L // 2
     say(f"2. A runs it honestly; B skips layer {layer} to save time")
-    runs = {"A": run_job(job, "A", every=a.every, model=model),
-            "B": run_job(job, "B", SkipLayer(layer, L), every=a.every, model=model)}
+    # each run's trace starts from its on-chain job's address (the binding), so B cannot
+    # replay A's fingerprint on its own job
+    runs = {"A": run_job(job, "A", model=model, binding=bytes(jobs["A"])),
+            "B": run_job(job, "B", SkipLayer(layer, L), model=model,
+                         binding=bytes(jobs["B"]))}
     salts = {}
     for name, p in (("A", pa), ("B", pb)):
         r = runs[name].receipt
@@ -99,17 +102,18 @@ def run(a) -> int:
     rpc.wait_slot(max(m.job(j).commit_deadline for j in jobs.values()))
     for name, p in (("A", pa), ("B", pb)):
         r = runs[name].receipt
-        sig = m.reveal_receipt(p, jobs[name], bytes.fromhex(r.fingerprint), salts[name],
-                               bytes.fromhex(r.model_hash), bytes.fromhex(r.trace_root),
-                               r.checkpoints)
-        say(f"   {name} reveals: {link(sig)}")
+        # the program checks the fingerprint against the answer, the logits hash and the
+        # trace's tree root and checkpoint count
+        sig = m.reveal_run(p, jobs[name], r, [c.leaf for c in runs[name].log.checkpoints],
+                           salts[name])
+        say(f"   {name} reveals {r.answer}: {link(sig)}")
 
     # ------------------------------------------------------------------ 3. verify
-    say("3. a verifier re-runs the job on this laptop")
-    mine = run_job(job, "verifier", every=a.every, model=model)
-    fp = bytes.fromhex(mine.receipt.fingerprint)
+    say("3. a verifier re-runs each job on this laptop (bound to the job's address)")
     challenged = []
     for name, p in (("A", pa), ("B", pb)):
+        mine = run_job(job, "verifier", model=model, binding=bytes(jobs[name]))
+        fp = bytes.fromhex(mine.receipt.fingerprint)
         posted = m.job(jobs[name]).fingerprint
         if posted == fp:
             say(f"   {name}: match -> accept")
@@ -119,11 +123,12 @@ def run(a) -> int:
             say(f"   {name}: MISMATCH -> challenge {link(sig)}")
 
     # ------------------------------------------------------------------ 4. dispute, slash
-    from .cli import dispute
+    from .verifier import dispute
     for name in challenged:
         say(f"4. bisecting {name}'s trace for the first instruction that went wrong")
-        _, d, f = dispute(job, runs[name].log.checkpoints, model, a.every,
-                          SkipLayer(layer, L), out=lambda s: say("  ", s))
+        _, d, f = dispute(job, runs[name].log.checkpoints, model, replay_cheat=SkipLayer(layer, L),
+                          out=lambda s: say("  ", s), binding=bytes(jobs[name]),
+                          receipt=runs[name].receipt)
         if d is None or f is None:
             sig = m.dismiss(jobs[name])
             say(f"   no fault found: challenge dismissed {link(sig)}")
