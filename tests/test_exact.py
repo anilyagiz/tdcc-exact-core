@@ -751,3 +751,21 @@ def test_hashes_assume_little_endian():
     import sys
     from tdcc_exact.trace import state_hash  # noqa: F401  (the import checks the byte order)
     assert sys.byteorder == "little"
+
+
+def test_strict_verify_rejects_an_unregistered_model(setup, tmp_path, capsys):
+    import dataclasses
+    from tdcc_exact.cli import main, verify
+    job, model, _ = setup
+    seed1 = dataclasses.replace(job, model="tiny:1")         # not in models.json
+    r = run_job(seed1, "A", model=tiny_model(1), binding=BIND)
+    v = verify(seed1, r.receipt)
+    assert v["verdict"] == "ACCEPT" and "not registered" in v["warning"]
+    v = verify(seed1, r.receipt, strict=True)
+    assert v["verdict"] == "REJECT" and "not registered" in v["why"]
+    seed1.save(tmp_path / "job.json")
+    r.receipt.save(tmp_path / "a.json")
+    base = ["verify", "--job", str(tmp_path / "job.json"), "--receipt", str(tmp_path / "a.json")]
+    assert main(base) == 0
+    assert main(base + ["--strict"]) == 1
+    assert "REJECT" in capsys.readouterr().out

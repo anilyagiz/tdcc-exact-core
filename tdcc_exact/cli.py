@@ -95,12 +95,13 @@ def read_salt(v: str) -> bytes:
 
 
 def verify(job: Job, rec: Receipt, every: int | None = None, trace=None,
-           binding=None, salt: bytes | None = None) -> dict:
+           binding=None, salt: bytes | None = None, strict: bool = False) -> dict:
     """A verifier's verdict on a receipt: ACCEPT, CHALLENGE (with the fields that differ) or
     REJECT (the reveal does not open the commitment, or the model build is not the job's).
     binding: the on-chain job account's address (never the receipt's own claim); None: the
     receipt's provider name's key (local runs). salt: the revealed salt (else a revealed
-    receipt's extra["salt"]); with neither, the commitment is not checked (a warning)."""
+    receipt's extra["salt"]); with neither, the commitment is not checked (a warning).
+    strict: an unregistered model is REJECT, not a warning (what nodes run)."""
     v = {"provider": rec.provider, "job_id": rec.job_id, "posted": rec.fingerprint}
     notes = []
     if "commitment" in rec.extra:
@@ -112,7 +113,7 @@ def verify(job: Job, rec: Receipt, every: int | None = None, trace=None,
                               bytes.fromhex(rec.fingerprint), rec.provider, s):
             return v | {"verdict": "REJECT", "why": "the reveal does not open its commitment"}
     why = registry.check(job, rec.model_hash)
-    if why is not None and "not registered" not in why:
+    if why is not None and ("not registered" not in why or strict):
         return v | {"verdict": "REJECT", "why": why}
     bind = provider_key(rec.provider) if binding is None else binding
     r = run_job(job, "verifier", every=every, binding=bind)
@@ -132,7 +133,7 @@ def verify(job: Job, rec: Receipt, every: int | None = None, trace=None,
 def cmd_verify(a) -> int:
     rec = Receipt.load(a.receipt)
     v = verify(Job.load(a.job), rec, a.every, a.trace, _binding(a, rec.provider),
-               read_salt(a.salt) if a.salt else None)
+               read_salt(a.salt) if a.salt else None, a.strict)
     if a.json:
         print(json.dumps(v, indent=1))
     elif v["verdict"] == "REJECT":
@@ -318,6 +319,8 @@ def main(argv=None) -> int:
                    "receipt's commitment")
     v.add_argument("--every", type=int, help="checked against the job's (job new --every)")
     v.add_argument("--json", action="store_true", help="print the verdict as JSON")
+    v.add_argument("--strict", action="store_true",
+                   help="REJECT a receipt for an unregistered model instead of warning")
     v.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "
                    "default: the provider name's key (the receipt's provider)")
     v.set_defaults(fn=cmd_verify)
