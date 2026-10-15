@@ -46,6 +46,8 @@ def state_hash(s) -> bytes:
 
 
 def merkle_root(leaves: list[bytes]) -> bytes:
+    """The leaves' Merkle tree, an odd level's last node paired with itself, and the leaf count
+    on top: without it [a, b, c] and [a, b, c, c] would share a root."""
     if not leaves:
         return h(b"empty")
     level = [h(b"\x00", x) for x in leaves]
@@ -53,7 +55,7 @@ def merkle_root(leaves: list[bytes]) -> bytes:
         if len(level) % 2:
             level.append(level[-1])
         level = [h(b"\x01", level[i], level[i + 1]) for i in range(0, len(level), 2)]
-    return level[0]
+    return h(b"\x02", len(leaves).to_bytes(8, "little"), level[0])
 
 
 @dataclass

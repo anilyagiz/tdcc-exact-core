@@ -77,6 +77,8 @@ def test_merkle_root_commits_to_order():
     x, y = b"a" * 16, b"b" * 16
     assert merkle_root([x, y]) != merkle_root([y, x])
     assert merkle_root([x]) != merkle_root([x, x])
+    z = b"c" * 16
+    assert merkle_root([x, y, z]) != merkle_root([x, y, z, z])   # a repeated last leaf
 
 
 def test_settlement_splits():

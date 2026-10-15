@@ -17,7 +17,8 @@ Every instruction the simulator steps extends a hash chain (SHA-256, the hash So
 Every 4096 steps, and when each device run ends, the log takes a checkpoint: a hash of each
 slice's working state (TMEM, the ACT RAM and its scales, the registers, the pc), folded into
 the chain. A checkpoint's leaf is `H(step || chain || state)`, and the trace root is the
-Merkle root of the leaves.
+Merkle root of the leaves with their count hashed on top (`H(2 || count || root)`), so a list
+with its last checkpoint repeated does not share the root.
 
 The host's writes into DRAM between runs (the token, its embedding row) and each run's
 arguments go into the chain too, so the log covers the inputs as well as the work.
