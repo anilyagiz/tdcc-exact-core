@@ -1,11 +1,10 @@
 name: exact
 
-# push runs on main and release tags only; every other branch is checked through its pull
-# request, so a PR from a branch in this repository does not run twice
+# every push is checked (work happens on branches before it has a pull request); a pull request
+# from a fork is checked through pull_request. A PR from a branch in this repository runs for
+# both events, and the concurrency group below keeps that to one run per ref.
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
