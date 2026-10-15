@@ -134,6 +134,10 @@ test USDC mint). The admin is also the **arbiter**: it signs `slash` (or `dismis
 off-chain bisection names the faulty step, which goes into the `Slashed` event. Replacing the
 arbiter by an on-chain bisection game is TODO.md item 6.
 
+`initialize` refuses a market with a zero commit window, a zero challenge window or a zero
+minimum stake. The reveal window reuses the commit window's length: `reveal_deadline =
+commit_deadline + commit_window`.
+
 | Instruction | Who | When |
 |:--|:--|:--|
 | `register_provider`, `stake`, `request_unstake`, `unstake` | provider | unstake after the cooldown and with no open jobs |
@@ -149,9 +153,17 @@ Tests: `cargo test -p tdcc_exact` (the settlement vectors, the commitment vector
 `tests/test_chain.py` on `solana-test-validator` (honest settle, slash, a copied commitment,
 an early reveal, a wrong model hash, a wrong signer, expiry, double settle, a dismissed
 challenge and raising it again, a free job, a ruling past the trace, unstaking through its
-cooldown; each checks the program's error code). CI runs both.
+cooldown, a market without windows or stake, a late challenge, a committed job that expires,
+a foreign treasury; each checks the program's error code, and the unstake and expiry tests read
+the events back from the transaction logs). CI runs both.
 
-Not yet: a challenge bond, verifier selection, the on-chain bisection (TODO.md items 6, 7).
+Every state change emits an event: `Initialized`, `ProviderRegistered`, `Staked`,
+`UnstakeRequested`, `Unstaked`, `JobOpened`, `ReceiptCommitted`, `ReceiptRevealed`,
+`Challenged`, `Dismissed`, `Slashed`, `Settled`, `Expired`.
+
+Not yet: a challenge bond, verifier selection, the on-chain bisection (TODO.md items 6, 7),
+and a deadline for the arbiter: a challenged job waits for `slash` or `dismiss`, with its
+escrow and its provider's stake held until then.
 
 ## 7. Overhead of the log
 
