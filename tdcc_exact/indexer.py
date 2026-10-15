@@ -95,6 +95,11 @@ def _b58_decode(s: str) -> bytes:
 # ------------------------------------------------------------------------------- events
 # programs/tdcc_exact/src/lib.rs, the #[event] structs, fields in order.
 EVENTS: dict[str, list[tuple[str, str]]] = {
+    "Initialized": [("config", "pubkey"), ("admin", "pubkey"), ("mint", "pubkey")],
+    "ProviderRegistered": [("provider", "pubkey")],
+    "UnstakeRequested": [("provider", "pubkey"), ("unlock_slot", "u64")],
+    "Unstaked": [("provider", "pubkey"), ("amount", "u64")],
+    "Expired": [("job", "pubkey"), ("renter", "pubkey"), ("refunded", "u64")],
     "Staked": [("provider", "pubkey"), ("amount", "u64"), ("stake", "u64")],
     "JobOpened": [("job", "pubkey"), ("renter", "pubkey"), ("provider", "pubkey"),
                   ("price", "u64"), ("job_digest", "bytes32")],

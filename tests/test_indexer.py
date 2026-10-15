@@ -254,14 +254,14 @@ def test_validator_flow_is_indexed():
     from tdcc_exact.commit import commitment
 
     rpc = Rpc(URL)
-    admin, renter, prov, verifier, treasury = (Keypair() for _ in range(5))
-    for k in (admin, renter, prov, verifier):
+    admin, renter, prov, verifier, treasury, leaver = (Keypair() for _ in range(6))
+    for k in (admin, renter, prov, verifier, leaver):
         rpc.airdrop(k.pubkey(), 1_000_000_000)
-    m = Market(rpc, admin, "localnet")
-    m.initialize(treasury.pubkey(), Params(commit_window=4, challenge_window=4,
-                                           unstake_cooldown=4))
     head = indexer.signatures(rpc, limit=1)
     since = head[0]["signature"] if head else None
+    m = Market(rpc, admin, "localnet")
+    m.initialize(treasury.pubkey(), Params(commit_window=10, challenge_window=6,
+                                           unstake_cooldown=4))
     m.mint_to(prov.pubkey(), 20_000_000)
     m.register_provider(prov)
     m.stake(prov, 20_000_000)
@@ -285,19 +285,6 @@ def test_validator_flow_is_indexed():
     j3, _ = m.open_job(renter, prov.pubkey(), 3, b"\x03" * 32, model, 1_000_000)
     rpc.wait_slot(max(m.job(j2).challenge_deadline, m.job(j3).reveal_deadline))
 
-    evs = list(indexer.events(rpc, limit=200, until=since))
-    mine = [e for e in evs if e.get("job") in (str(j1), str(j2), str(j3))
-            or e.get("provider") == str(prov.pubkey())]
-    assert [e["name"] for e in mine] == [
-        "Staked", "JobOpened", "ReceiptCommitted", "ReceiptRevealed", "Challenged",
-        "Dismissed", "Settled", "JobOpened", "ReceiptCommitted", "ReceiptRevealed",
-        "JobOpened"]
-    assert [e["slot"] for e in evs] == sorted(e["slot"] for e in evs)
-    assert mine[0]["stake"] == 20_000_000 and mine[1]["price"] == 2_000_000
-    assert mine[3]["fingerprint"] == "11" * 32 and mine[3]["checkpoints"] == 3
-    assert mine[4]["verifier"] == str(verifier.pubkey())
-    assert (mine[6]["host"], mine[6]["fee"]) == (1_600_000, 400_000)
-
     s = indexer.snapshot(rpc, str(admin.pubkey()))
     assert list(s["configs"]) == [str(m.config)]
     assert s["jobs_by_state"] == {"Settled": 1, "Revealed": 1, "Open": 1}
@@ -309,3 +296,32 @@ def test_validator_flow_is_indexed():
     assert s["open_challenges"] == []
     everything = indexer.snapshot(rpc)
     assert everything["jobs"] >= 3 and str(m.config) in everything["configs"]
+
+    m.expire(renter, j3)
+    m.mint_to(leaver.pubkey(), 15_000_000)                 # a provider that leaves
+    m.register_provider(leaver)
+    m.stake(leaver, 15_000_000)
+    m.request_unstake(leaver)
+    rpc.wait_slot(m.provider(leaver.pubkey()).unlock_slot)
+    m.unstake(leaver)
+
+    evs = list(indexer.events(rpc, limit=200, until=since))
+    assert [e["slot"] for e in evs] == sorted(e["slot"] for e in evs)
+    assert all(e["name"] != "?" for e in evs)
+    init = [e for e in evs if e["name"] == "Initialized" and e["config"] == str(m.config)]
+    assert init and init[0]["admin"] == str(admin.pubkey()) and init[0]["mint"] == str(m.mint)
+    mine = [e for e in evs if e.get("job") in (str(j1), str(j2), str(j3))
+            or e.get("provider") == str(prov.pubkey())]
+    assert [e["name"] for e in mine] == [
+        "ProviderRegistered", "Staked", "JobOpened", "ReceiptCommitted", "ReceiptRevealed",
+        "Challenged", "Dismissed", "Settled", "JobOpened", "ReceiptCommitted",
+        "ReceiptRevealed", "JobOpened", "Expired"]
+    assert mine[1]["stake"] == 20_000_000 and mine[2]["price"] == 2_000_000
+    assert mine[4]["fingerprint"] == "11" * 32 and mine[4]["checkpoints"] == 3
+    assert mine[5]["verifier"] == str(verifier.pubkey())
+    assert (mine[7]["host"], mine[7]["fee"]) == (1_600_000, 400_000)
+    assert (mine[12]["renter"], mine[12]["refunded"]) == (str(renter.pubkey()), 1_000_000)
+    gone = [e for e in evs if e.get("provider") == str(leaver.pubkey())]
+    assert [e["name"] for e in gone] == ["ProviderRegistered", "Staked", "UnstakeRequested",
+                                         "Unstaked"]
+    assert gone[2]["unlock_slot"] > 0 and gone[3]["amount"] == 15_000_000
