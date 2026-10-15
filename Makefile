@@ -73,3 +73,11 @@ tourney-report:
 
 test-tourney:
 	$(PYTHON) -m pytest -q tests/test_tourney.py
+
+# TDCC Exact's local gate, what CI's lint, python and rust-lint jobs check (no chain, no board)
+.PHONY: exact-check
+exact-check:
+	ruff check
+	$(PYTHON) -m pytest -q tests/test_exact.py tests/test_api.py
+	-cargo fmt --all --check   # advisory, as in CI, until lib.rs is formatted
+	cargo clippy -p tdcc_exact --all-targets -- -D warnings
