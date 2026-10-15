@@ -58,6 +58,35 @@ def merkle_root(leaves: list[bytes]) -> bytes:
     return h(b"\x02", len(leaves).to_bytes(8, "little"), level[0])
 
 
+def merkle_proof(leaves: list[bytes], index: int) -> list[bytes]:
+    """The sibling of leaves[index]'s node on each level, bottom up: with the leaf count, what
+    shows one checkpoint belongs to a posted trace root (merkle_verify), so a bisection round
+    on-chain needs one leaf and log2(checkpoints) hashes, not the whole list."""
+    if not 0 <= index < len(leaves):
+        raise IndexError(index)
+    level, path = [h(b"\x00", x) for x in leaves], []
+    while len(level) > 1:
+        if len(level) % 2:
+            level.append(level[-1])
+        path.append(level[index ^ 1])
+        level = [h(b"\x01", level[i], level[i + 1]) for i in range(0, len(level), 2)]
+        index //= 2
+    return path
+
+
+def merkle_verify(leaf: bytes, index: int, count: int, path: list[bytes], root: bytes) -> bool:
+    """Whether `leaf` is leaf number `index` of a trace root over `count` leaves."""
+    if not 0 <= index < count:
+        return False
+    node, n = h(b"\x00", leaf), count
+    for sib in path:
+        if n <= 1:
+            return False
+        node = h(b"\x01", node, sib) if index % 2 == 0 else h(b"\x01", sib, node)
+        index, n = index // 2, (n + 1) // 2
+    return n == 1 and h(b"\x02", count.to_bytes(8, "little"), node) == root
+
+
 @dataclass
 class Checkpoint:
     step: int                    # steps so far (the instruction count across runs and slices)

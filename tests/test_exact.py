@@ -8,7 +8,7 @@ from tdcc_exact.backend import SkipLayer
 from tdcc_exact.dispute import bisect, first_fault, matches_root
 from tdcc_exact.oracle import layers_of, new_job, run_job, tiny_model
 from tdcc_exact.settle import accept, slash
-from tdcc_exact.trace import StepRecord, merkle_root
+from tdcc_exact.trace import StepRecord, merkle_proof, merkle_root, merkle_verify
 
 EVERY = 512
 
@@ -88,6 +88,20 @@ def test_merkle_root_commits_to_order():
     assert merkle_root([x]) != merkle_root([x, x])
     z = b"c" * 16
     assert merkle_root([x, y, z]) != merkle_root([x, y, z, z])   # a repeated last leaf
+
+
+def test_merkle_proofs_open_every_leaf_and_nothing_else():
+    for n in range(1, 10):
+        leaves = [bytes([i]) * 32 for i in range(n)]
+        root = merkle_root(leaves)
+        for i in range(n):
+            path = merkle_proof(leaves, i)
+            assert merkle_verify(leaves[i], i, n, path, root)
+            assert not merkle_verify(leaves[i], i, n + 1, path, root)       # another count
+            assert not merkle_verify(b"x" * 32, i, n, path, root)           # another leaf
+            if n > 1:
+                assert not merkle_verify(leaves[i], (i + 1) % n, n, path, root)
+        assert not merkle_verify(leaves[0], n, n, merkle_proof(leaves, 0), root)
 
 
 def test_settlement_splits():
