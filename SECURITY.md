@@ -28,7 +28,8 @@ listed in [TODO.md](TODO.md) (items 6 and 7) and [docs/exact.md](docs/exact.md):
 
 - challenges are decided by an arbiter, the market's admin key, until the on-chain bisection
   game replaces it;
-- there is no challenge bond and no random verifier selection yet;
+- there is no challenge bond and no random verifier selection yet, and the arbiter has no
+  deadline: a challenged job holds its escrow and its provider's stake until it rules;
 - DRAM stores are not in the trace's state hash; a wrong final store is caught by the logits
   hash only.
 

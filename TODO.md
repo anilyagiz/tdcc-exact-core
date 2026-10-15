@@ -110,6 +110,9 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
 - [ ] Verifier selection: random (VRF / slot hash), so a provider cannot collude with "its"
       verifier.
 - [ ] Rate limits on challenges: a challenge bond, lost when the challenge is wrong.
+- [ ] A deadline for the arbiter: a challenged job holds its escrow and its provider's stake
+      until `slash` or `dismiss`; after the deadline anyone could dismiss. Needs a new field
+      in `Config` (an account layout change: a new market, or a migration).
 
 ### 8. Services
 - [ ] Provider node daemon: watches the chain for jobs, runs them on the card or the
