@@ -162,8 +162,10 @@ have to re-run the job on the simulator to produce a trace, which defeats the ca
 ### 12. Housekeeping
 - [ ] Licenses: Apache-2.0 NOTICE is in place for openTPU. Check the LFM2.5 model license
       for commercial use before charging for jobs on it.
-- [ ] Windows: the upstream package imports `fcntl` (Linux only) in `opentpu/rtlsim.py`,
+- [x] Windows: the upstream package imports `fcntl` (Linux only) in `opentpu/rtlsim.py`,
       `opentpu/host/board.py`, `host/i2c.py`, `host/runstate.py`; the test conftest
       imports them. Either keep Linux-only (and say so) or make those imports lazy.
+      (tdcc-exact's path never imports them, so the verifier runs without `fcntl`;
+      `test_the_verifier_needs_no_fcntl` keeps it so. The card hosts stay Linux-only.)
 - [ ] Keep `upstream` (FeSens/openTPU) mergeable: the only change inside `opentpu/` is the
       observer hook in `isasim.Machine.run`.

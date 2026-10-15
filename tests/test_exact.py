@@ -251,6 +251,20 @@ def test_a_receipt_with_no_run_behind_it_is_challenged(setup, tmp_path):
     assert main(verify + ["--receipt", str(tmp_path / "b.json")]) == 1
 
 
+def test_the_verifier_needs_no_fcntl():
+    """Verifiers run on any laptop, Windows included: nothing on tdcc-exact's path may import
+    fcntl (only the card and RTL hosts in opentpu/ do)."""
+    import subprocess
+    import sys
+    code = ("import sys; sys.modules['fcntl'] = None\n"
+            "from tdcc_exact.cli import main\n"
+            "from tdcc_exact.oracle import new_job, run_job, tiny_model\n"
+            "run_job(new_job('tiny', 'x', 't'), 'A', model=tiny_model())\n")
+    root = Path(__file__).resolve().parents[1]
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+
+
 LFM2 = Path(__file__).resolve().parents[1] / "models" / "LFM2.5-230M"
 
 
