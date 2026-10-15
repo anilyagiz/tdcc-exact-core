@@ -420,7 +420,7 @@ pub mod tdcc_exact {
         let job_key = ctx.accounts.job.key();
         ctx.accounts.job.state = JobState::Settled;
         let p = &mut ctx.accounts.provider;
-        p.open_jobs = p.open_jobs.saturating_sub(1);
+        p.open_jobs = p.open_jobs.checked_sub(1).ok_or(ExactError::Overflow)?;
         emit!(Settled {
             job: job_key,
             provider: p.owner,
@@ -478,7 +478,7 @@ pub mod tdcc_exact {
         ctx.accounts.job.bond = 0;
         let p = &mut ctx.accounts.provider;
         p.stake = 0;
-        p.open_jobs = p.open_jobs.saturating_sub(1);
+        p.open_jobs = p.open_jobs.checked_sub(1).ok_or(ExactError::Overflow)?;
         emit!(Slashed {
             job: job_key,
             provider: p.owner,
@@ -564,7 +564,7 @@ pub mod tdcc_exact {
         ctx.accounts.job.state = JobState::Expired;
         let p = &mut ctx.accounts.provider;
         p.stake -= penalty; // penalty <= stake
-        p.open_jobs = p.open_jobs.saturating_sub(1);
+        p.open_jobs = p.open_jobs.checked_sub(1).ok_or(ExactError::Overflow)?;
         emit!(Expired {
             job: job_key,
             renter,
