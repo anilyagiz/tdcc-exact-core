@@ -95,6 +95,8 @@ tdcc-exact run --job job.json --provider B --skip-layer 1 --out b.json --trace b
 tdcc-exact verify --job job.json --receipt a.json      # ACCEPT, exit 0
 tdcc-exact verify --job job.json --receipt b.json      # CHALLENGE, exit 1
 tdcc-exact dispute --job job.json --trace b.trace.json --receipt b.json --replay-skip-layer 1
+tdcc-exact verify --job job.json --receipt b.json --json   # the verdict, for a verifier node
+tdcc-exact prove --trace b.trace.json --index 1            # one checkpoint, its Merkle path
 ```
 
 ### On Solana

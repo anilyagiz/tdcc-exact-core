@@ -137,18 +137,19 @@ arbiter by an on-chain bisection game is TODO.md item 6.
 | Instruction | Who | When |
 |:--|:--|:--|
 | `register_provider`, `stake`, `request_unstake`, `unstake` | provider | unstake after the cooldown and with no open jobs |
-| `open_job` | renter | the provider is staked; the price moves into the vault |
+| `open_job` | renter | the provider is staked and not leaving; the price (above 0: an open job locks the provider's stake) moves into the vault |
 | `commit_receipt` | the job's provider | until `commit_deadline` |
 | `reveal_receipt` | the job's provider | after `commit_deadline`, until `reveal_deadline`; opens the commitment, model hash must be the job's |
-| `challenge` | anyone but the provider | until `challenge_deadline`, with another fingerprint |
+| `challenge` | anyone but the provider | until `challenge_deadline`, with another fingerprint; once per job (a dismissed challenge is not raised again) |
 | `settle` | anyone | revealed, unchallenged, after `challenge_deadline` |
-| `slash`, `dismiss` | the arbiter | challenged |
+| `slash`, `dismiss` | the arbiter | challenged; `slash` names a checkpoint index of the posted trace (at most its count) |
 | `expire` | anyone | no reveal by `reveal_deadline`: the escrow goes back to the renter |
 
 Tests: `cargo test -p tdcc_exact` (the settlement vectors, the commitment vector) and
 `tests/test_chain.py` on `solana-test-validator` (honest settle, slash, a copied commitment,
 an early reveal, a wrong model hash, a wrong signer, expiry, double settle, a dismissed
-challenge; each checks the program's error code). CI runs both.
+challenge and raising it again, a free job, a ruling past the trace, unstaking through its
+cooldown; each checks the program's error code). CI runs both.
 
 Not yet: a challenge bond, verifier selection, the on-chain bisection (TODO.md items 6, 7).
 
