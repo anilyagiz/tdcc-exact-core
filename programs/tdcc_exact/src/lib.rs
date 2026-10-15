@@ -27,8 +27,9 @@
 //! SHA-256(tag || fingerprint || provider key || salt) and reveals only after the commit
 //! deadline, when copying is too late.
 //!
-//! Who decides a challenge: for now an arbiter (the config's admin, TDCC) signs `slash` or
-//! `dismiss` after the off-chain bisection (tdcc_exact/dispute.py) names the faulty step; the
+//! Who decides a challenge: for now an arbiter (the config's `arbiter` key, set at initialize
+//! and rotated by the admin with `set_arbiter`, so it can be a separate multisig) signs `slash`
+//! or `dismiss` after the off-chain bisection (tdcc_exact/dispute.py) names the faulty step; the
 //! step is in the `Slashed` event. The on-chain bisection game is TODO.md item 6.
 //!
 //! The arithmetic is tdcc_exact/settle.py's: shares in basis points, rounded down, the
@@ -86,8 +87,10 @@ pub mod tdcc_exact {
         );
         require!(params.challenge_bond > 0, ExactError::BadParams);
         require!(params.arbiter_window > 0, ExactError::BadParams);
+        require!(params.arbiter != Pubkey::default(), ExactError::BadParams);
         let c = &mut ctx.accounts.config;
         c.admin = ctx.accounts.admin.key();
+        c.arbiter = params.arbiter;
         c.mint = ctx.accounts.mint.key();
         c.treasury = ctx.accounts.treasury.key();
         c.vault = ctx.accounts.vault.key();
@@ -105,6 +108,21 @@ pub mod tdcc_exact {
             config: c.key(),
             admin: c.admin,
             mint: c.mint
+        });
+        Ok(())
+    }
+
+    /// The admin hands the arbiter role to another key (a multisig, or a fresh key after a
+    /// compromise). Pending challenges are ruled by the new arbiter.
+    pub fn set_arbiter(ctx: Context<SetArbiter>, arbiter: Pubkey) -> Result<()> {
+        require!(arbiter != Pubkey::default(), ExactError::BadParams);
+        let c = &mut ctx.accounts.config;
+        let old = c.arbiter;
+        c.arbiter = arbiter;
+        emit!(ArbiterChanged {
+            config: c.key(),
+            old,
+            new: arbiter
         });
         Ok(())
     }
@@ -451,7 +469,7 @@ pub mod tdcc_exact {
     pub fn dismiss(ctx: Context<Dismiss>) -> Result<()> {
         let j = &ctx.accounts.job;
         require!(j.state == JobState::Challenged, ExactError::WrongState);
-        if ctx.accounts.caller.key() != ctx.accounts.config.admin {
+        if ctx.accounts.caller.key() != ctx.accounts.config.arbiter {
             require!(
                 Clock::get()?.slot > j.ruling_deadline,
                 ExactError::ArbiterWindowOpen
@@ -577,15 +595,17 @@ pub struct ConfigParams {
     pub unstake_cooldown: u64,
     pub challenge_bond: u64,
     pub arbiter_window: u64,
+    pub arbiter: Pubkey,
 }
 
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
-    pub admin: Pubkey, // the arbiter of challenges (for now: TDCC)
+    pub admin: Pubkey, // seeds the config; may rotate the arbiter
     pub mint: Pubkey,  // USDC
     pub treasury: Pubkey,
-    pub vault: Pubkey, // holds every escrow and every stake
+    pub vault: Pubkey,   // holds every escrow and every stake
+    pub arbiter: Pubkey, // rules on challenges (slash, dismiss)
     pub host_bps: u16,
     pub verifier_bps: u16,
     pub commit_window: u64, // slots
@@ -661,6 +681,13 @@ pub struct Initialize<'info> {
     pub treasury: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetArbiter<'info> {
+    pub admin: Signer<'info>,
+    #[account(mut, seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = admin)]
+    pub config: Account<'info, Config>,
 }
 
 #[derive(Accounts)]
@@ -749,7 +776,8 @@ pub struct Challenge<'info> {
     pub verifier: Signer<'info>,
     #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = mint, has_one = vault)]
     pub config: Account<'info, Config>,
-    #[account(mut, has_one = config, constraint = job.provider != verifier.key() @ ExactError::NotYourJob)]
+    #[account(mut, has_one = config, constraint = job.provider != verifier.key() @ ExactError::NotYourJob,
+              constraint = verifier.key() != config.arbiter @ ExactError::ArbiterChallenger)]
     pub job: Account<'info, Job>,
     pub mint: Account<'info, Mint>,
     #[account(mut, token::mint = mint, token::authority = verifier)]
@@ -780,8 +808,8 @@ pub struct Settle<'info> {
 
 #[derive(Accounts)]
 pub struct Slash<'info> {
-    pub admin: Signer<'info>,
-    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = admin, has_one = mint,
+    pub arbiter: Signer<'info>,
+    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = arbiter, has_one = mint,
               has_one = vault, has_one = treasury)]
     pub config: Account<'info, Config>,
     #[account(mut, has_one = config, constraint = job.provider == provider.owner @ ExactError::NotYourJob)]
@@ -837,6 +865,13 @@ pub struct Initialized {
     pub config: Pubkey,
     pub admin: Pubkey,
     pub mint: Pubkey,
+}
+
+#[event]
+pub struct ArbiterChanged {
+    pub config: Pubkey,
+    pub old: Pubkey,
+    pub new: Pubkey,
 }
 
 #[event]
@@ -958,6 +993,8 @@ pub enum ExactError {
     AlreadyChallenged,
     #[msg("only the arbiter may rule before the ruling deadline")]
     ArbiterWindowOpen,
+    #[msg("the arbiter may not challenge a job it rules on")]
+    ArbiterChallenger,
 }
 
 #[cfg(test)]

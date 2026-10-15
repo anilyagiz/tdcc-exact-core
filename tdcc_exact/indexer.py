@@ -96,6 +96,7 @@ def _b58_decode(s: str) -> bytes:
 # programs/tdcc_exact/src/lib.rs, the #[event] structs, fields in order.
 EVENTS: dict[str, list[tuple[str, str]]] = {
     "Initialized": [("config", "pubkey"), ("admin", "pubkey"), ("mint", "pubkey")],
+    "ArbiterChanged": [("config", "pubkey"), ("old", "pubkey"), ("new", "pubkey")],
     "ProviderRegistered": [("provider", "pubkey")],
     "UnstakeRequested": [("provider", "pubkey"), ("unlock_slot", "u64")],
     "Unstaked": [("provider", "pubkey"), ("amount", "u64")],
@@ -205,10 +206,10 @@ def events(rpc, program: str = PROGRAM, limit: int = 100, until: str | None = No
 # ------------------------------------------------------------------------------- accounts
 # programs/tdcc_exact/src/lib.rs `Config`, after the discriminator.
 CONFIG_FIELDS = [("admin", "pubkey"), ("mint", "pubkey"), ("treasury", "pubkey"),
-                 ("vault", "pubkey"), ("host_bps", "u16"), ("verifier_bps", "u16"),
-                 ("commit_window", "u64"), ("challenge_window", "u64"), ("min_stake", "u64"),
-                 ("unstake_cooldown", "u64"), ("challenge_bond", "u64"), ("arbiter_window", "u64"),
-                 ("bump", "u8"), ("vault_bump", "u8")]
+                 ("vault", "pubkey"), ("arbiter", "pubkey"), ("host_bps", "u16"),
+                 ("verifier_bps", "u16"), ("commit_window", "u64"), ("challenge_window", "u64"),
+                 ("min_stake", "u64"), ("unstake_cooldown", "u64"), ("challenge_bond", "u64"),
+                 ("arbiter_window", "u64"), ("bump", "u8"), ("vault_bump", "u8")]
 
 LIVE = ("Open", "Committed", "Revealed", "Challenged")      # the escrow is still in the vault
 

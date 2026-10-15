@@ -300,14 +300,17 @@ class Params:
     unstake_cooldown: int = 50
     challenge_bond: int = 1_000_000  # 1 USDC, a verifier's deposit per challenge
     arbiter_window: int = 16         # slots the arbiter has to rule on a challenge
+    arbiter: Pubkey | None = None    # who rules on challenges (None: the admin)
 
 
 class Market:
-    """One market instance of the program, run by `admin` (the arbiter of challenges)."""
+    """One market instance of the program, run by `admin`. `arbiter` signs slash and dismiss
+    (the config's arbiter key; by default the admin's)."""
 
     def __init__(self, rpc: Rpc, admin: Keypair, cluster: str = "devnet",
-                 program_id: Pubkey = PROGRAM_ID):
+                 program_id: Pubkey = PROGRAM_ID, arbiter: Keypair | None = None):
         self.rpc, self.admin, self.cluster, self.pid = rpc, admin, cluster, program_id
+        self.arbiter = arbiter or admin
         self.config = self.pda(b"config", bytes(admin.pubkey()))
         self.vault = self.pda(b"vault", bytes(self.config))
         self.mint: Pubkey | None = None
@@ -379,7 +382,8 @@ class Market:
         data = (u16(params.host_bps) + u16(params.verifier_bps) + u64(params.commit_window)
                 + u64(params.challenge_window) + u64(params.min_stake)
                 + u64(params.unstake_cooldown) + u64(params.challenge_bond)
-                + u64(params.arbiter_window))
+                + u64(params.arbiter_window)
+                + bytes(params.arbiter or self.admin.pubkey()))
         ixs = [self.token_account_ix(treasury_owner),
                self._ix("initialize",
                         [S(self.admin.pubkey(), True), W(self.config), R(self.mint),
@@ -420,10 +424,11 @@ class Market:
         d = self.rpc.account(self.config)
         if d is None:
             raise ChainError(f"no config account {self.config}")
-        o = 8 + 4 * 32
+        o = 8 + 5 * 32
         hb, vb = struct.unpack("<HH", d[o:o + 4])
-        rest = struct.unpack("<6Q", d[o + 4:o + 52])
-        return Params(hb, vb, *rest)
+        cw, chw, ms, uc, bond, aw = struct.unpack("<6Q", d[o + 4:o + 52])
+        return Params(hb, vb, cw, chw, ms, uc, bond, aw,
+                      arbiter=Pubkey.from_bytes(d[8 + 4 * 32:8 + 5 * 32]))
 
     def provider(self, owner: Pubkey) -> ProviderAccount | None:
         d = self.rpc.account(self.provider_pda(owner))
@@ -481,16 +486,25 @@ class Market:
                                         W(self.treasury), R(TOKEN_PROGRAM)])],
                              payer)
 
+    def set_arbiter(self, arbiter: Pubkey) -> str:
+        """The admin hands the arbiter role to `arbiter` (a multisig, a fresh key)."""
+        return self.rpc.send([self._ix("set_arbiter",
+                                       [S(self.admin.pubkey()), W(self.config)],
+                                       bytes(arbiter))], self.admin)
+
     def slash(self, job: Pubkey, divergence_index: int, fault_step: int) -> str:
+        """The arbiter's ruling for the verifier (the admin pays the fee and the verifier's
+        token account if it has none)."""
         j = self.job(job)
         return self.rpc.send([self.token_account_ix(j.verifier),
                               self._ix("slash",
-                                       [S(self.admin.pubkey()), R(self.config), W(job),
+                                       [S(self.arbiter.pubkey()), R(self.config), W(job),
                                         W(self.provider_pda(j.provider)), R(self.mint),
                                         W(self.vault), W(ata(j.renter, self.mint)),
                                         W(ata(j.verifier, self.mint)), W(self.treasury),
                                         R(TOKEN_PROGRAM)],
-                                       u32(divergence_index) + u64(fault_step))], self.admin)
+                                       u32(divergence_index) + u64(fault_step))],
+                             self.admin, self.arbiter)
 
     def dismiss_ix(self, caller: Pubkey, job: Pubkey, provider: Pubkey) -> Instruction:
         return self._ix("dismiss",
@@ -500,10 +514,11 @@ class Market:
     def dismiss(self, job: Pubkey, caller: Keypair | None = None) -> str:
         """The arbiter rejects the challenge (or, after the job's ruling deadline, anyone ends
         it); the bond goes to the provider."""
-        caller = caller or self.admin
+        caller = caller or self.arbiter
+        payer = self.admin if caller is self.arbiter else caller
         j = self.job(job)
-        return self.rpc.send([self.token_account_ix(j.provider, caller.pubkey()),
-                              self.dismiss_ix(caller.pubkey(), job, j.provider)], caller)
+        return self.rpc.send([self.token_account_ix(j.provider, payer.pubkey()),
+                              self.dismiss_ix(caller.pubkey(), job, j.provider)], payer, caller)
 
     def expire(self, payer: Keypair, job: Pubkey) -> str:
         j = self.job(job)

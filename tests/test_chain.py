@@ -48,19 +48,21 @@ pytestmark = pytest.mark.skipif(not _up(), reason=f"no validator with the progra
 @pytest.fixture(scope="module")
 def world():
     rpc = Rpc(URL)
-    admin, renter, verifier = Keypair(), Keypair(), Keypair()
+    import dataclasses
+    admin, renter, verifier, arbiter = Keypair(), Keypair(), Keypair(), Keypair()
     a, b, c, treasury = Keypair(), Keypair(), Keypair(), Keypair()
-    for k in (admin, renter, verifier, a, b, c):
+    for k in (admin, renter, verifier, arbiter, a, b, c):
         rpc.airdrop(k.pubkey(), 2_000_000_000)
-    m = Market(rpc, admin, "localnet")
-    m.initialize(treasury.pubkey(), WORLD)
+    m = Market(rpc, admin, "localnet", arbiter=arbiter)     # the arbiter: its own key
+    m.initialize(treasury.pubkey(), dataclasses.replace(WORLD, arbiter=arbiter.pubkey()))
     for p in (a, b, c):
         m.mint_to(p.pubkey(), STAKE)
         m.register_provider(p)
         m.stake(p, STAKE)
     m.mint_to(renter.pubkey(), 100 * PRICE)
     m.mint_to(verifier.pubkey(), 100 * BOND)
-    return dict(m=m, rpc=rpc, admin=admin, renter=renter, verifier=verifier, a=a, b=b, c=c,
+    return dict(m=m, rpc=rpc, admin=admin, arbiter=arbiter, renter=renter, verifier=verifier,
+                a=a, b=b, c=c,
                 treasury=treasury, next=[1])
 
 
@@ -70,9 +72,8 @@ def _events(w, sig) -> list[str]:
     import base64
     import hashlib
     import time
-    names = ["Initialized", "ProviderRegistered", "Staked", "UnstakeRequested", "Unstaked",
-             "JobOpened", "ReceiptCommitted", "ReceiptRevealed", "Challenged", "Settled",
-             "Slashed", "Dismissed", "Expired"]
+    from tdcc_exact.indexer import EVENTS             # every #[event] (test_indexer checks)
+    names = list(EVENTS)
     disc = {hashlib.sha256(f"event:{n}".encode()).digest()[:8]: n for n in names}
     for _ in range(20):
         tx = w["rpc"].call("getTransaction", sig, {"encoding": "json", "commitment": "confirmed",
@@ -127,7 +128,7 @@ def test_caught_provider_is_slashed(world):
     assert m.job(job).bond == BOND
     assert v_pre - m.balance(w["verifier"].pubkey()) == BOND        # the bond is posted
     impostor = copy.copy(m)
-    impostor.admin = w["verifier"]
+    impostor.arbiter = w["verifier"]
     with pytest.raises(ChainError, match="ConstraintHasOne"):                 # only the arbiter slashes
         impostor.slash(job, 1, 1234)
     r0, v0, t0 = (m.balance(w[k].pubkey()) for k in ("renter", "verifier", "treasury"))
@@ -235,10 +236,10 @@ def test_a_dismissed_challenge_cannot_be_raised_again(world):
     job = _open(w, w["a"])
     _post(w, w["a"], job, b"\x0b" * 32)
     m.challenge(w["verifier"], job, b"\x0c" * 32)
-    again = [m.dismiss_ix(w["admin"].pubkey(), job, w["a"].pubkey()),
+    again = [m.dismiss_ix(w["arbiter"].pubkey(), job, w["a"].pubkey()),
              m.challenge_ix(w["verifier"].pubkey(), job, b"\x0d" * 32)]
     with pytest.raises(ChainError, match="AlreadyChallenged"):
-        w["rpc"].send(again, w["admin"], w["verifier"])
+        w["rpc"].send(again, w["admin"], w["arbiter"], w["verifier"])
     assert m.job(job).state == "Challenged"            # the transaction rolled back whole
 
 
@@ -365,3 +366,41 @@ def test_initialize_needs_an_arbiter_window(world):
     world["rpc"].airdrop(m.admin.pubkey(), 1_000_000_000)
     with pytest.raises(ChainError, match="BadParams"):
         m.initialize(Keypair().pubkey(), Params(arbiter_window=0))
+
+
+def test_the_admin_rotates_the_arbiter(world):
+    """The arbiter is its own key, not the admin's, and the admin can hand it on (to a multisig,
+    or away from a stolen key); only the admin can."""
+    w, m = world, world["m"]
+    assert m.params().arbiter == w["arbiter"].pubkey()
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x14" * 32)
+    m.challenge(w["verifier"], job, b"\x15" * 32)
+    new = Keypair()
+    w["rpc"].airdrop(new.pubkey(), 1_000_000_000)
+    usurper = copy.copy(m)
+    usurper.admin = w["verifier"]
+    with pytest.raises(ChainError, match="ConstraintSeeds|ConstraintHasOne"):
+        usurper.set_arbiter(w["verifier"].pubkey())
+    with pytest.raises(ChainError, match="ArbiterWindowOpen"):    # the admin is not the arbiter
+        m.dismiss(job, w["admin"])
+    assert _events(w, m.set_arbiter(new.pubkey())) == ["ArbiterChanged"]
+    try:
+        with pytest.raises(ChainError, match="ArbiterWindowOpen"):  # the old arbiter is out
+            m.dismiss(job, w["arbiter"])
+        m.dismiss(job, new)
+        assert m.job(job).state == "Revealed"
+    finally:
+        m.set_arbiter(w["arbiter"].pubkey())
+    assert m.params().arbiter == w["arbiter"].pubkey()
+
+
+def test_the_arbiter_may_not_challenge(world):
+    """A stolen arbiter key must not both raise and rule a challenge (taking verifier_bps of
+    every stake it slashes)."""
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x16" * 32)
+    m.mint_to(w["arbiter"].pubkey(), BOND)
+    with pytest.raises(ChainError, match="ArbiterChallenger"):
+        m.challenge(w["arbiter"], job, b"\x17" * 32)
