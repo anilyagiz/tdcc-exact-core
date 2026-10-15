@@ -1,10 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tdcc-exact-core"
 version = "0.1.0"
 description = "TDCC Exact Core: an auditable AI accelerator (built on openTPU) whose every answer anyone can re-check"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
+authors = [{ name = "The Decentralized Compute Company" }]
+keywords = ["verifiable-compute", "ai-accelerator", "fpga", "tpu", "solana", "fraud-proof"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Hardware",
+]
 dependencies = ["numpy", "textual"]
+
+[project.urls]
+Homepage = "https://github.com/anilyagiz/tdcc-exact-core"
+Repository = "https://github.com/anilyagiz/tdcc-exact-core"
+Issues = "https://github.com/anilyagiz/tdcc-exact-core/issues"
+Upstream = "https://github.com/FeSens/openTPU"
 
 [project.optional-dependencies]
 chain = ["solders>=0.21"]
