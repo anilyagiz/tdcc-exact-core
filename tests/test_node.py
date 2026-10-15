@@ -4,6 +4,8 @@ end to end on a local validator (skipped without one, as tests/test_chain.py):
     TDCC_EXACT_RPC=http://127.0.0.1:8899 python -m pytest -q tests/test_node.py
 """
 import json
+import os
+import time
 
 import pytest
 
@@ -102,6 +104,15 @@ def test_a_tampered_trace_is_rejected(tmp_path, trace):
     bad["checkpoints"][0][1] = "00" * 32
     with pytest.raises(Tampered):
         d.put_raw("traces", trace["root"], json.dumps(bad).encode())
+
+
+def test_cli_publish(tmp_path, job, capsys):
+    from tdcc_exact.cli import main
+    job.save(tmp_path / "job.json")
+    assert main(["node", "publish", "--job", str(tmp_path / "job.json"),
+                 "--store", str(tmp_path / "store")]) == 0
+    assert capsys.readouterr().out.strip() == job.digest.hex()
+    assert DirStore(tmp_path / "store").get_job(job.digest) == job
 
 
 def test_open_store(tmp_path):
@@ -274,3 +285,83 @@ def test_verifier_sampling(fake):
     assert all(_verifier(fake, rate=1.0).sampled(k) for k in keys)
     assert 25 < sum(_verifier(fake, rate=0.25).sampled(k) for k in keys) < 80
 
+
+# ------------------------------------------------------------------------------- on a validator
+URL = os.environ.get("TDCC_EXACT_RPC", "http://127.0.0.1:8899")
+
+
+def _chain_up() -> bool:
+    try:
+        from tdcc_exact.chain import PROGRAM_ID, Rpc
+        rpc = Rpc(URL)
+        rpc.call("getHealth")
+        return rpc.account(PROGRAM_ID) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@pytest.mark.skipif(not _chain_up(), reason=f"no validator with the program at {URL}")
+def test_nodes_on_a_validator(tmp_path, job):
+    from solders.keypair import Keypair
+
+    from tdcc_exact import registry
+    from tdcc_exact.chain import Market, Params, Rpc
+    from tdcc_exact.cli import main
+    from tdcc_exact.node.chainio import Chain
+    from tdcc_exact.node.common import Models
+    from tdcc_exact.node.provider import ProviderNode
+    from tdcc_exact.node.verifier import VerifierNode
+
+    rpc = Rpc(URL)
+    admin, renter, verifier, a, b, treasury = (Keypair() for _ in range(6))
+    for k in (admin, renter, verifier, a, b):
+        rpc.airdrop(k.pubkey(), 2_000_000_000)
+    m = Market(rpc, admin, "localnet")
+    m.initialize(treasury.pubkey(), Params(commit_window=20, challenge_window=40))
+    for p in (a, b):
+        m.mint_to(p.pubkey(), 50_000_000)
+        m.register_provider(p)
+        m.stake(p, 50_000_000)
+    m.mint_to(renter.pubkey(), 10_000_000)
+
+    # the renter publishes the job and opens it with A, with B, and once with A naming a
+    # model hash that is not the registry's (A must refuse that one)
+    srv, url = start(DirStore(tmp_path / "store"))
+    store = HttpStore(url)
+    assert store.put_job(job) == job.digest.hex()
+    pinned = bytes.fromhex(registry.expected("tiny", job.wformat, job.cap))
+    base = int(time.time() * 1000)
+    ja, _ = m.open_job(renter, a.pubkey(), base, job.digest, pinned, 1_000_000)
+    jb, _ = m.open_job(renter, b.pubkey(), base + 1, job.digest, pinned, 1_000_000)
+    jx, _ = m.open_job(renter, a.pubkey(), base + 2, job.digest, bytes([9]) * 32, 1_000_000)
+
+    chain, models, quiet = Chain(m), Models(), (lambda *x: None)
+    # A through the CLI (keys: provider.json, admin.json), B as a dishonest node in-process
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    for name, k in (("provider", a), ("admin", admin)):
+        (keys / f"{name}.json").write_text(json.dumps(list(bytes(k))))
+    pb = ProviderNode(chain, b, store, tmp_path / "b" / "state.json", models, EVERY,
+                      skip_layer=1, log=quiet)
+    assert pb.run_once() == {str(jb): "committed"}       # (A's --once waits out the window)
+    assert main(["node", "provider", "--rpc", URL, "--keys", str(keys), "--store", url,
+                 "--every", str(EVERY), "--once"]) == 0
+    assert pb.run_once(wait=True) == {str(jb): "published"}
+    sa = json.loads((keys / "provider.state" / "state.json").read_text())
+    assert sa[str(ja)]["status"] == "published" and sa[str(jx)]["status"] == "refused"
+    assert m.job(ja).state == "Revealed" and m.job(jb).state == "Revealed"
+    assert m.job(jx).state == "Open"
+    assert store.get_trace(m.job(ja).trace_root)["root"] == m.job(ja).trace_root.hex()
+
+    # a restarted A does nothing more
+    pa = ProviderNode(chain, a, store, keys / "provider.state" / "state.json", models, EVERY,
+                      log=quiet)
+    assert pa.run_once(wait=True) == {}
+
+    v = VerifierNode(chain, verifier, store, tmp_path / "v" / "state.json", models, EVERY,
+                     log=quiet)
+    assert v.run_once() == {str(ja): "accepted", str(jb): "challenged"}
+    assert m.job(jb).state == "Challenged" and m.job(jb).verifier == verifier.pubkey()
+    assert m.job(ja).state == "Revealed"
+    assert v.run_once() == {}
+    srv.shutdown()

@@ -24,6 +24,7 @@ from . import registry
 from .backend import SkipLayer
 from .commit import check_reveal, commitment, new_salt
 from .dispute import bisect, first_fault, matches_root
+from .node.cli import add_parser as add_node_parser
 from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
                      model_name, new_job, run_job, save_trace)
 from .settle import accept, slash
@@ -275,6 +276,8 @@ def main(argv=None) -> int:
     m.add_argument("--challenge-window", type=int, default=60,
                    help="slots, for a market this run creates (the verifier's run time)")
     m.set_defaults(fn=cmd_demo)
+
+    add_node_parser(sub)
 
     a = p.parse_args(argv)
     try:
