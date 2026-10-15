@@ -249,16 +249,19 @@ def as_binding(binding) -> bytes:
 
 
 def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
-            every: int = EVERY, window=None, model=None, binding=None) -> Run:
+            every: int = EVERY, window=None, model=None, binding=None,
+            reveal: int | None = None) -> Run:
     """Run `job` on a traced Exact Core simulator (cheat: a dishonest provider's shortcut;
-    window: (lo, hi], record each step there for a dispute; binding: the on-chain job
-    account's 32-byte address, the trace's first input; None: UNBOUND, for local tries only)."""
+    window: (lo, hi], record each step there for a dispute; reveal: a checkpoint index,
+    record every event up to it in log.events, for dispute.verify_window; binding: the
+    on-chain job account's 32-byte address, the trace's first input; None: UNBOUND, for
+    local tries only)."""
     from opentpu.llm.qwen3 import Engine    # (every Spec's engine: Qwen3, LFM2, ...)
     job.check_nonce()
     bind = as_binding(binding)
     spec, W = model if model is not None else load_model(job.model)
     job.check(getattr(spec, "vocab", None))
-    log = TraceLog(every=every, window=window, binding=bind)
+    log = TraceLog(every=every, window=window, binding=bind, reveal=reveal)
     eng = Engine(spec, W, cap=job.cap, backend=factory(log, cheat), wformat=job.wformat,
                  rows=job.chunk, pipeline=False)
     logits = eng.prefill([int(t) for t in job.prompt_ids], chunk=job.chunk)

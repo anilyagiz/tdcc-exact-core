@@ -483,7 +483,9 @@ def test_the_trace_commits_to_the_logits_read_back(setup, monkeypatch):
     monkeypatch.undo()                                              # the verifier is honest
     from tdcc_exact.cli import dispute
     _, d, f = dispute(job, b.log.checkpoints, model, EVERY, out=lambda m: None, binding=BIND)
-    assert f is not None and f.what == "output" and f.step == a.log.step
+    # (the provider's replay here reads honestly, so its window does not reach the
+    # checkpoint it posted: it loses on the window before the output is ruled on)
+    assert f is not None and f.what == "window" and f.step == a.log.step
 
 
 def _forge(job, rec, **kw):
@@ -565,3 +567,82 @@ def test_a_skipped_final_store_is_named_by_the_dispute(setup):
     assert d is not None and d.lo < d.hi            # a step, not only the reads after them
     assert f is not None and f.what == "state" and f.slice == 0
     assert f.honest.startswith(I.OPNAMES[I.ST])
+
+
+# ------------------------------------------------------------------ revealed windows
+def _window(job, model, k, cheat=None):
+    return run_job(job, "A", cheat, every=EVERY, model=model, binding=BIND, reveal=k).log.events
+
+
+def _flip(v: str) -> str:
+    return v[:-2] + ("00" if v[-2:] != "00" else "01")
+
+
+def test_an_honest_revealed_window_verifies(setup):
+    import dataclasses
+    from tdcc_exact.dispute import verify_window
+    from tdcc_exact.trace import Event, chain_start, record_from_json, record_to_json
+    job, model, a = setup
+    cps = a.log.checkpoints
+    for k in (0, 2, len(cps) - 1):                  # the first, one inside, the last (reads)
+        ev = _window(job, model, k)
+        start = cps[k - 1] if k else chain_start(BIND)
+        assert verify_window(ev, start, cps[k]) is None, k
+        assert verify_window([record_from_json(record_to_json(r)) for r in ev],
+                             start, cps[k]) is None
+    kinds = {r.kind for r in ev if isinstance(r, Event)}
+    assert {"O", "C"} <= kinds                      # the last window: the reads and the fold
+    # one changed byte fails: a step's registers, the closing fold's slice state
+    ev = _window(job, model, 2)
+    steps = [i for i, r in enumerate(ev) if isinstance(r, StepRecord)]
+    bad = list(ev)
+    i = steps[len(steps) // 2]
+    bad[i] = dataclasses.replace(bad[i], regs=_flip(bad[i].regs))
+    assert verify_window(bad, cps[1], cps[2]) is not None
+    bad = list(ev)
+    bad[-1] = dataclasses.replace(bad[-1], data=[_flip(bad[-1].data[0])] + bad[-1].data[1:])
+    assert verify_window(bad, cps[1], cps[2]) is not None
+    bad = list(ev)
+    i = steps[-1]
+    bad[i] = dataclasses.replace(bad[i], state="00" * 32)   # (not in the chain: the fold is)
+    assert "state" in verify_window(bad, cps[1], cps[2])
+
+
+def test_a_truncated_or_padded_window_fails(setup):
+    from tdcc_exact.dispute import verify_window
+    job, model, a = setup
+    cps = a.log.checkpoints
+    ev = _window(job, model, 2)
+    assert "truncated" in verify_window(ev[:-1], cps[1], cps[2])
+    assert verify_window(ev[:len(ev) // 2], cps[1], cps[2]) is not None
+    assert verify_window(ev[1:], cps[1], cps[2]) is not None
+    assert verify_window(ev + ev[-1:], cps[1], cps[2]) is not None
+    assert verify_window(ev, cps[0], cps[2]) is not None           # another start
+
+
+def test_an_honest_window_does_not_cover_cheating_checkpoints(setup):
+    """A provider that posted a cheating trace cannot reveal the honest window for it."""
+    from tdcc_exact.dispute import verify_window
+    from tdcc_exact.trace import chain_start
+    job, model, a = setup
+    L = layers_of(model[0])
+    b = run_job(job, "B", SkipLayer(1, L), every=EVERY, model=model, binding=BIND)
+    k = bisect(a.log.checkpoints, b.log.checkpoints).index
+    start = b.log.checkpoints[k - 1] if k else chain_start(BIND)
+    end = b.log.checkpoints[k]
+    assert verify_window(_window(job, model, k), start, end) is not None
+    assert verify_window(_window(job, model, k, SkipLayer(1, L)), start, end) is None
+
+
+def test_a_provider_whose_window_does_not_chain_loses_the_dispute(setup):
+    """The provider replays its window with another shortcut than the one it posted."""
+    from tdcc_exact.cli import dispute
+    job, model, a = setup
+    L = layers_of(model[0])
+    b = run_job(job, "B", SkipLayer(1, L), every=EVERY, model=model, binding=BIND)
+    _, d, f = dispute(job, b.log.checkpoints, model, EVERY, SkipLayer(0, L),
+                      out=print, binding=BIND)
+    assert d is not None and f is not None and f.what == "window"
+    _, d, f = dispute(job, b.log.checkpoints, model, EVERY, SkipLayer(1, L),
+                      out=print, binding=BIND)
+    assert f is not None and f.what == "state"

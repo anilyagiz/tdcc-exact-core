@@ -141,6 +141,42 @@ class StepRecord:
     instr: str                   # and as text, for people (its comment may differ by compile)
     chain: str
     state: str
+    regs: str = ""               # R0..R15 after it (what the chain hashed), for verify_window
+
+
+@dataclass
+class Event:
+    """Anything else that moved the chain inside a revealed window (TraceLog.reveal): a host
+    write ("W": slice, address, H(data)), a host read ("O": slice, address, length,
+    H(data)), a run start ("R": the arguments' bytes) or a checkpoint ("C": each slice's
+    state hash). `data` holds those parts in hex, `chain` the chain after the event."""
+    kind: str
+    step: int
+    data: list
+    chain: str
+
+
+def record_to_json(r) -> dict:
+    return {"type": "step" if isinstance(r, StepRecord) else "event"} | r.__dict__
+
+
+def record_from_json(d: dict):
+    d = dict(d)
+    kind = d.pop("type")
+    return StepRecord(**d) if kind == "step" else Event(**d)
+
+
+def next_chain(chain: bytes, r) -> bytes:
+    """The chain after record `r` (a StepRecord or an Event), as TraceLog computed it."""
+    if isinstance(r, StepRecord):
+        return h(chain, r.slice.to_bytes(2, "little"), r.pc.to_bytes(4, "little"),
+                 bytes.fromhex(r.words), bytes.fromhex(r.regs))
+    parts = [bytes.fromhex(x) for x in r.data]
+    if r.kind == "C":
+        return h(chain, b"C", h(*parts))
+    if r.kind in ("W", "O", "R"):
+        return h(chain, r.kind.encode(), *parts)
+    raise ValueError(f"unknown event {r.kind!r}")
 
 
 @dataclass
@@ -148,10 +184,12 @@ class TraceLog:
     every: int = EVERY
     window: tuple[int, int] | None = None     # (lo, hi]: record each step's state here
     binding: bytes = UNBOUND                  # the on-chain job account (see chain_start)
+    reveal: int | None = None                 # record every event up to checkpoint `reveal`
     step: int = 0
     chain: bytes = field(init=False)
     checkpoints: list[Checkpoint] = field(default_factory=list)
     records: list[StepRecord] = field(default_factory=list)
+    events: list = field(default_factory=list)    # the revealed window: StepRecords, Events
     _words: dict = field(default_factory=dict)    # id(program) -> (program, encoded words)
 
     def __post_init__(self):
@@ -169,36 +207,55 @@ class TraceLog:
         words = ent[1][pc]
         if words is None:
             words = ent[1][pc] = np.asarray(prog[pc].encode(), np.uint32).tobytes()
-        regs = np.asarray([r & 0xFFFFFFFF for r in s.R], np.uint32).tobytes()
+        regs = np.asarray([r & 0xFFFFFFFF for r in s.R], "<u4").tobytes()
         self.step += 1
         self.chain = h(self.chain, s.sid.to_bytes(2, "little"), pc.to_bytes(4, "little"),
                        words, regs)
+        rec = None
         if self.window is not None and self.window[0] < self.step <= self.window[1]:
-            self.records.append(StepRecord(self.step, s.sid, pc, words.hex(), str(prog[pc]),
-                                           self.chain.hex(), state_hash(s).hex()))
+            rec = StepRecord(self.step, s.sid, pc, words.hex(), str(prog[pc]),
+                             self.chain.hex(), state_hash(s).hex(), regs.hex())
+            self.records.append(rec)
+        if self._revealing():
+            self.events.append(rec or StepRecord(self.step, s.sid, pc, words.hex(),
+                                                 str(prog[pc]), self.chain.hex(),
+                                                 state_hash(s).hex(), regs.hex()))
         if self.step % self.every == 0:
             self.checkpoint(slices)
 
+    def _revealing(self) -> bool:
+        return self.reveal is not None and len(self.checkpoints) == self.reveal
+
+    def _event(self, kind: str, *parts: bytes) -> None:
+        self.chain = h(self.chain, kind.encode(), *parts)
+        if self._revealing():
+            self.events.append(Event(kind, self.step, [p.hex() for p in parts],
+                                     self.chain.hex()))
+
     def host_write(self, s: int, addr: int, data: bytes) -> None:
-        self.chain = h(self.chain, b"W", s.to_bytes(2, "little"), addr.to_bytes(8, "little"),
-                       h(data))
+        self._event("W", s.to_bytes(2, "little"), addr.to_bytes(8, "little"), h(data))
 
     def host_read(self, s: int, addr: int, data: bytes) -> None:
         """What the host read back from DRAM (the logits): the output is in the chain."""
-        self.chain = h(self.chain, b"O", s.to_bytes(2, "little"), addr.to_bytes(8, "little"),
-                       len(data).to_bytes(8, "little"), h(data))
+        self._event("O", s.to_bytes(2, "little"), addr.to_bytes(8, "little"),
+                    len(data).to_bytes(8, "little"), h(data))
 
     def run_start(self, args) -> None:
-        a = np.asarray([0] if args is None else [int(x) & 0xFFFFFFFF for x in args], np.uint32)
-        self.chain = h(self.chain, b"R", a.tobytes())
+        a = np.asarray([0] if args is None else [int(x) & 0xFFFFFFFF for x in args], "<u4")
+        self._event("R", a.tobytes())
 
     def checkpoint(self, slices) -> None:
         last = self.checkpoints[-1] if self.checkpoints else None
         if last is not None and last.step == self.step and last.chain == self.chain:
             return                              # (nothing happened since)
-        st = h(*[state_hash(s) for s in slices])
+        states = [state_hash(s) for s in slices]
+        st = h(*states)
+        rev = self._revealing()
         self.chain = h(self.chain, b"C", st)     # (so a difference in state stays in the chain)
         self.checkpoints.append(Checkpoint(self.step, self.chain, st))
+        if rev:
+            self.events.append(Event("C", self.step, [x.hex() for x in states],
+                                     self.chain.hex()))
 
     def finish(self, slices) -> None:
         """The last checkpoint, after the host read the output: the root covers the reads."""

@@ -5,7 +5,9 @@
    the first differing checkpoint in log2(checkpoints) rounds. This is the game an on-chain
    referee plays, one round per transaction.
 2. Both sides reveal that window, one record per step (where it ran, the chain, a hash of the
-   slice's state after it); the first record that differs is the instruction at fault.
+   slice's state after it); the first record that differs is the instruction at fault. A
+   provider's revealed window must chain from the agreed checkpoint to the one it posted
+   (verify_window), or it loses: it cannot reveal records it did not commit to.
 3. If the traces agree, the receipt must be the one the trace gives (output_fault): the trace
    commits to the logits the host read, so a receipt with another answer or logits hash than
    the verifier's re-run is at fault even though no instruction is.
@@ -17,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .trace import Checkpoint, merkle_root
+from .trace import Checkpoint, StepRecord, h, merkle_root, next_chain
 
 
 @dataclass
@@ -109,3 +111,54 @@ def output_fault(job, posted, mine, provider_cps: list[Checkpoint]) -> Fault | N
     last = provider_cps[-1].step if provider_cps else 0
     return Fault(last, -1, -1, f"receipt from the trace: {mine.answer} {mine.logits_hash}",
                  "; ".join(why), "output")
+
+
+def verify_window(records: list, start_checkpoint, end_checkpoint: Checkpoint) -> str | None:
+    """Whether a provider's revealed window chains from the agreed checkpoint to the one it
+    posted: None if it does, else why not (the provider loses the dispute).
+
+    records: everything that moved the chain after `start_checkpoint` up to and including
+    `end_checkpoint`'s fold (TraceLog.reveal: StepRecords with their registers, and Events
+    for host writes, host reads, run starts and the closing checkpoint with each slice's
+    state hash). start_checkpoint: the last agreed Checkpoint, or the chain's first value
+    (trace.chain_start(binding), bytes) when the very first checkpoint is disputed.
+
+    The check replays the chain record by record (each record's chain must be the one its
+    fields give), counts the steps, ends on exactly one checkpoint fold that gives
+    `end_checkpoint` (step, chain and state), and checks each step's state hash against the
+    slice's state in that fold when it is the slice's last step of the window."""
+    if isinstance(start_checkpoint, Checkpoint):
+        chain, step = start_checkpoint.chain, start_checkpoint.step
+    else:
+        chain, step = bytes(start_checkpoint), 0
+    last_state: dict = {}
+    for i, r in enumerate(records):
+        try:
+            nxt = next_chain(chain, r)
+        except (ValueError, AttributeError, TypeError) as e:
+            return f"record {i}: malformed ({e})"
+        if r.chain != nxt.hex():
+            return f"record {i} (step {r.step}): its chain is not the one its fields give"
+        chain = nxt
+        if isinstance(r, StepRecord):
+            step += 1
+            if r.step != step:
+                return f"record {i}: step {r.step}, expected {step}"
+            last_state[r.slice] = r.state
+            continue
+        if r.step != step:
+            return f"record {i}: event at step {r.step}, expected {step}"
+        if r.kind != "C":
+            continue
+        if i != len(records) - 1:
+            return f"record {i}: a checkpoint inside the window (records continue past it)"
+        if (step, chain.hex()) != (end_checkpoint.step, end_checkpoint.chain.hex()):
+            return (f"the window ends at step {step}, chain {chain.hex()}, not the posted "
+                    f"checkpoint (step {end_checkpoint.step}, {end_checkpoint.chain.hex()})")
+        if h(*[bytes.fromhex(x) for x in r.data]) != end_checkpoint.state:
+            return "the closing checkpoint's slice states are not its posted state hash"
+        for sid, st in last_state.items():
+            if sid >= len(r.data) or r.data[sid] != st:
+                return f"slice {sid}'s last step state is not its state at the checkpoint"
+        return None
+    return "the window does not reach its closing checkpoint (truncated)"

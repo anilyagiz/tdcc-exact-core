@@ -23,13 +23,13 @@ import time
 from . import registry
 from .backend import SkipLayer
 from .commit import check_reveal, commitment, new_salt, provider_key
-from .dispute import Fault, bisect, first_fault, matches_root, output_fault
+from .dispute import Fault, bisect, first_fault, matches_root, output_fault, verify_window
 from .indexer import cmd_market
 from .node.cli import add_parser as add_node_parser
-from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
-                     model_name, new_job, run_job, save_trace)
+from .oracle import (TINY, Job, Receipt, as_binding, build_hash, layers_of, load_model,
+                     load_trace, model_name, new_job, run_job, save_trace)
 from .settle import accept, slash
-from .trace import EVERY, Checkpoint, merkle_proof, merkle_root, merkle_verify
+from .trace import EVERY, Checkpoint, chain_start, merkle_proof, merkle_root, merkle_verify
 
 
 def _cheat(layer, model) -> SkipLayer | None:
@@ -129,16 +129,25 @@ def dispute(job: Job, provider_cps: list[Checkpoint], model, every: int,
         return mine, None, f
     out(f"bisection: checkpoint {d.index} of {len(mine.log.checkpoints)} differs "
         f"({d.rounds} rounds), steps {d.lo + 1}..{d.hi}")
+    w = (d.lo, d.hi)
+    prov = run_job(job, "provider", replay_cheat, every, window=w, model=model,
+                   binding=binding, reveal=d.index).log
+    if d.index < len(provider_cps):     # the provider's revealed window must chain to its posts
+        start = (provider_cps[d.index - 1] if d.index
+                 else chain_start(as_binding(binding)))
+        why = verify_window(prov.events, start, provider_cps[d.index])
+        if why is not None:
+            f = Fault(d.lo, -1, -1, "a window that chains to the posted checkpoints", why,
+                      "window")
+            out(f"the provider's revealed window does not chain to its checkpoints: {why}")
+            return mine, d, f
     if d.hi == d.lo:                    # no step between: the host's reads after the last run
         f = Fault(d.lo, -1, -1, "the logits the host read back", "other logits", "output")
         out(f"first fault: the output read back after step {d.lo} ({f.what})")
         return mine, d, f
-    w = (d.lo, d.hi)
     honest = run_job(job, "verifier", every=every, window=w, model=model,
                      binding=binding).log.records
-    other = run_job(job, "provider", replay_cheat, every, window=w, model=model,
-                    binding=binding).log.records
-    f = first_fault(honest, other)
+    f = first_fault(honest, prov.records)
     if f is not None:
         out(f"first fault: step {f.step}, slice {f.slice}, pc {f.pc} ({f.what})")
         out(f"  {f.honest}")
