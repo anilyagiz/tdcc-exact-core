@@ -11,18 +11,26 @@ The receipt's fingerprint binds everything a verifier re-checks:
 
 so two honest runs of a job, on a card or on a laptop, post the same fingerprint, and any
 difference in the work changes it.
+
+A run is bound to the on-chain job account it is for: `binding` (32 bytes, the account's
+address; locally the provider's key) is the trace chain's first input, so the same Job opened
+twice (with provider A and with provider B, or asked again) has two trace roots and two
+fingerprints, and a fingerprint revealed on one is no use on the other. A verifier re-runs
+with the binding of the on-chain job, never one a receipt claims. The job also carries a
+random nonce (new_job) in its digest, so two jobs' digests differ too.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 from .backend import SkipLayer, factory
-from .trace import EVERY, TraceLog, h
+from .trace import EVERY, UNBOUND, TraceLog, h
 
 TINY = "tiny"                    # a small random Qwen3-style model: tests and the quick demo
 
@@ -38,6 +46,7 @@ class Job:
     cap: int = 256               # the KV cache's positions
     chunk: int = 8               # prompt tokens per device run (Engine.prefill: the trace's shape)
     job_id: str = ""
+    nonce: str = ""              # 32 random bytes (hex), chosen by new_job: in the digest
 
     @property
     def digest(self) -> bytes:
@@ -64,6 +73,18 @@ class Job:
         if bad:
             raise ValueError(f"token ids outside the vocabulary ({vocab}): {bad[:5]}")
 
+    def check_nonce(self) -> bytes:
+        """The nonce's bytes. A job without one (a file from before nonces) is refused: two
+        such jobs with the same question would share a fingerprint."""
+        try:
+            n = bytes.fromhex(self.nonce)
+        except ValueError:
+            n = b""
+        if len(n) != NONCE:
+            raise ValueError(f"job {self.job_id or '-'} has no {NONCE}-byte nonce (a job file "
+                             "from before nonces?): open it again with `tdcc-exact job new`")
+        return n
+
     def save(self, path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=1))
 
@@ -83,6 +104,13 @@ def is_tiny(model: str) -> bool:
     return True
 
 
+NONCE = 32                       # bytes
+
+
+def new_nonce() -> str:
+    return os.urandom(NONCE).hex()
+
+
 def model_name(model: str) -> str:
     """A job's model by name (the directory's last part): the image hash pins the weights."""
     return model if is_tiny(model) else Path(model).name
@@ -100,6 +128,8 @@ class Receipt:
     checkpoints: int
     fingerprint: str
     extra: dict = field(default_factory=dict)
+    binding: str = ""            # the run's binding (hex): informative, a verifier re-runs with
+                                 # the on-chain job's own
 
     def save(self, path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=1))
@@ -177,7 +207,8 @@ def new_job(model: str, question: str, job_id: str = "") -> Job:
     """An oracle job: the question in the model's chat template, answered Yes or No."""
     if is_tiny(model):
         ids = [1 + (b % 500) for b in question.encode()][:24] or [1]
-        return Job(model, ids, yes_id=3, no_id=4, question=question, job_id=job_id)
+        return Job(model, ids, yes_id=3, no_id=4, question=question, job_id=job_id,
+                   nonce=new_nonce())
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(model)
     msg = [{"role": "system", "content": "Answer with exactly one word: Yes or No."},
@@ -189,7 +220,7 @@ def new_job(model: str, question: str, job_id: str = "") -> Job:
     yes, no = (tok.encode(w, add_special_tokens=False) for w in ("Yes", "No"))
     if yes[0] == no[0]:
         raise ValueError(f"{model}: 'Yes' / 'No' start with the same token ({yes}, {no})")
-    return Job(model, ids, yes[0], no[0], question=question, job_id=job_id)
+    return Job(model, ids, yes[0], no[0], question=question, job_id=job_id, nonce=new_nonce())
 
 
 @dataclass
@@ -207,14 +238,27 @@ def build_hash(model: str, wformat: str = "int8", cap: int = 256, loaded=None) -
     return eng.backend.model_hash.hex()
 
 
+def as_binding(binding) -> bytes:
+    """32 bytes from bytes, a hex string or None (UNBOUND: a run tied to no job)."""
+    if binding is None:
+        return UNBOUND
+    b = bytes.fromhex(binding) if isinstance(binding, str) else bytes(binding)
+    if len(b) != 32:
+        raise ValueError(f"a binding is 32 bytes (the job account's address), not {len(b)}")
+    return b
+
+
 def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
-            every: int = EVERY, window=None, model=None) -> Run:
+            every: int = EVERY, window=None, model=None, binding=None) -> Run:
     """Run `job` on a traced Exact Core simulator (cheat: a dishonest provider's shortcut;
-    window: (lo, hi], record each step there for a dispute)."""
+    window: (lo, hi], record each step there for a dispute; binding: the on-chain job
+    account's 32-byte address, the trace's first input; None: UNBOUND, for local tries only)."""
     from opentpu.llm.qwen3 import Engine    # (every Spec's engine: Qwen3, LFM2, ...)
+    job.check_nonce()
+    bind = as_binding(binding)
     spec, W = model if model is not None else load_model(job.model)
     job.check(getattr(spec, "vocab", None))
-    log = TraceLog(every=every, window=window)
+    log = TraceLog(every=every, window=window, binding=bind)
     eng = Engine(spec, W, cap=job.cap, backend=factory(log, cheat), wformat=job.wformat,
                  rows=job.chunk, pipeline=False)
     logits = eng.prefill([int(t) for t in job.prompt_ids], chunk=job.chunk)
@@ -224,7 +268,7 @@ def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
     fp = h(job.digest, mh, answer.encode(), lh, root)
     extra = {"skipped_mms": cheat.skipped} if cheat is not None else {}
     rec = Receipt(job.job_id, provider, answer, mh.hex(), lh.hex(), root.hex(), log.step,
-                  len(log.checkpoints), fp.hex(), extra)
+                  len(log.checkpoints), fp.hex(), extra, bind.hex())
     return Run(rec, log, logits)
 
 

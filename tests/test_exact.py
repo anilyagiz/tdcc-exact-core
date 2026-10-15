@@ -5,24 +5,26 @@ import pytest
 
 from opentpu import isa as I
 from tdcc_exact.backend import SkipLayer
+from tdcc_exact.commit import provider_key
 from tdcc_exact.dispute import bisect, first_fault, matches_root
 from tdcc_exact.oracle import layers_of, new_job, run_job, tiny_model
 from tdcc_exact.settle import accept, slash
 from tdcc_exact.trace import Checkpoint, StepRecord, merkle_proof, merkle_root, merkle_verify
 
 EVERY = 512
+BIND = provider_key("A")      # A's job (the CLI's default binding for provider A)
 
 
 @pytest.fixture(scope="module")
 def setup():
     model = tiny_model()
     job = new_job("tiny", "Will it rain tomorrow?", "t1")
-    return job, model, run_job(job, "A", every=EVERY, model=model)
+    return job, model, run_job(job, "A", every=EVERY, model=model, binding=BIND)
 
 
 def test_honest_runs_post_the_same_fingerprint(setup):
     job, model, a = setup
-    b = run_job(job, "A2", every=EVERY, model=model)
+    b = run_job(job, "A2", every=EVERY, model=model, binding=BIND)
     assert a.receipt.fingerprint == b.receipt.fingerprint
     assert [c.leaf for c in a.log.checkpoints] == [c.leaf for c in b.log.checkpoints]
     assert (a.logits == b.logits).all()
@@ -38,7 +40,7 @@ def test_another_question_changes_the_fingerprint(setup):
 def test_a_skipped_layer_is_caught_at_the_skipped_instruction(setup):
     job, model, a = setup
     cheat = lambda: SkipLayer(1, layers_of(model[0]))     # noqa: E731
-    b = run_job(job, "B", cheat(), every=EVERY, model=model)
+    b = run_job(job, "B", cheat(), every=EVERY, model=model, binding=BIND)
     assert b.receipt.extra["skipped_mms"] > 0
     assert b.receipt.fingerprint != a.receipt.fingerprint
     d = bisect(a.log.checkpoints, b.log.checkpoints)
@@ -49,8 +51,9 @@ def test_a_skipped_layer_is_caught_at_the_skipped_instruction(setup):
     assert all(x.leaf != y.leaf for x, y in zip(a.log.checkpoints[d.index:],
                                                 b.log.checkpoints[d.index:]))
     w = (d.lo, d.hi)
-    honest = run_job(job, "v", every=EVERY, window=w, model=model).log.records
-    other = run_job(job, "B", cheat(), every=EVERY, window=w, model=model).log.records
+    honest = run_job(job, "v", every=EVERY, window=w, model=model, binding=BIND).log.records
+    other = run_job(job, "B", cheat(), every=EVERY, window=w, model=model,
+                    binding=BIND).log.records
     f = first_fault(honest, other)
     assert f is not None and f.what == "state" and f.honest.startswith(I.OPNAMES[I.MM])
 
@@ -209,7 +212,8 @@ def test_a_provider_running_fp4_instead_of_int8_is_caught(setup):
     from tdcc_exact import registry
     job, model, a = setup
     assert registry.check(job, a.receipt.model_hash) is None    # the honest int8 run
-    cheap = run_job(dataclasses.replace(job, wformat="fp4"), "B", every=EVERY, model=model)
+    cheap = run_job(dataclasses.replace(job, wformat="fp4"), "B", every=EVERY, model=model,
+                    binding=BIND)
     assert registry.check(job, cheap.receipt.model_hash) is not None
     assert cheap.receipt.fingerprint != a.receipt.fingerprint
 
@@ -218,7 +222,7 @@ def test_a_provider_running_other_weights_is_caught(setup):
     """A smaller or cheaper model in place of the job's: same shape, other weights."""
     from tdcc_exact import registry
     job, _, a = setup
-    other = run_job(job, "B", every=EVERY, model=tiny_model(1))
+    other = run_job(job, "B", every=EVERY, model=tiny_model(1), binding=BIND)
     assert other.receipt.model_hash != a.receipt.model_hash
     assert registry.check(job, other.receipt.model_hash) is not None
     assert other.receipt.fingerprint != a.receipt.fingerprint
@@ -230,7 +234,7 @@ def test_a_provider_skipping_prompt_tokens_is_caught(setup):
     import dataclasses
     job, model, a = setup
     short = run_job(dataclasses.replace(job, prompt_ids=job.prompt_ids[:-4]), "B",
-                    every=EVERY, model=model)
+                    every=EVERY, model=model, binding=BIND)
     assert short.receipt.trace_root != a.receipt.trace_root
     assert short.receipt.steps < a.receipt.steps
     assert short.receipt.fingerprint != a.receipt.fingerprint
@@ -259,7 +263,8 @@ def test_the_verdict_names_what_differs(setup):
     from tdcc_exact.commit import commitment, new_salt
     job, model, a = setup
     assert verify(job, a.receipt, EVERY)["verdict"] == "ACCEPT"
-    b = run_job(job, "B", SkipLayer(1, layers_of(model[0])), every=EVERY, model=model)
+    b = run_job(job, "B", SkipLayer(1, layers_of(model[0])), every=EVERY, model=model,
+                binding=BIND)
     v = verify(job, b.receipt, EVERY)
     assert v["verdict"] == "CHALLENGE" and "trace_root" in v["differs"]
     salt = new_salt()
@@ -406,3 +411,53 @@ def test_lfm2_job_is_reproducible_and_a_skipped_layer_is_seen():
     c = run_job(job, "B", cheat, model=model)
     assert c.receipt.extra["skipped_mms"] == 88       # layer 5 (conv): 8 mixer + 80 MLP MMs
     assert c.receipt.fingerprint != a.receipt.fingerprint
+
+
+# ------------------------------------------------------------------ cross-job replay
+def test_the_same_question_twice_gets_different_digests(setup):
+    job, model, a = setup
+    job2 = new_job("tiny", job.question, "t2")
+    assert job2.prompt_ids == job.prompt_ids and job2.nonce != job.nonce
+    assert job2.digest != job.digest
+    b = run_job(job2, "A", every=EVERY, model=model)
+    assert b.receipt.fingerprint != a.receipt.fingerprint
+
+
+def test_one_job_under_two_bindings_gets_two_fingerprints(setup):
+    """The same Job opened on-chain twice (with A and with B): each run is bound to its job
+    account, so B cannot post A's revealed fingerprint."""
+    job, model, a = setup
+    x = run_job(job, "A", every=EVERY, model=model, binding=b"\x01" * 32)
+    y = run_job(job, "A", every=EVERY, model=model, binding=b"\x02" * 32)
+    assert x.receipt.fingerprint != y.receipt.fingerprint
+    assert x.receipt.trace_root != y.receipt.trace_root
+    assert x.log.checkpoints[0].leaf != y.log.checkpoints[0].leaf
+    assert x.receipt.binding == "01" * 32
+    assert (x.logits == y.logits).all() and x.receipt.answer == y.receipt.answer
+
+
+def test_a_receipt_for_one_binding_does_not_verify_under_another(setup, tmp_path, capsys):
+    from tdcc_exact.cli import main
+    job, model, _ = setup
+    job.save(tmp_path / "job.json")
+    x = run_job(job, "A", every=EVERY, model=model, binding=b"\x01" * 32)
+    x.receipt.save(tmp_path / "x.json")
+    args = ["verify", "--job", str(tmp_path / "job.json"), "--receipt", str(tmp_path / "x.json"),
+            "--every", str(EVERY), "--binding"]
+    assert main(args + ["01" * 32]) == 0
+    assert main(args + ["02" * 32]) == 1
+    assert "CHALLENGE" in capsys.readouterr().out
+    # without --binding: the provider name's key, not the binding the receipt claims
+    assert main(args[:-1]) == 1
+
+
+def test_a_job_without_a_nonce_is_refused(setup, tmp_path):
+    import json
+    from tdcc_exact.oracle import Job
+    job, model, _ = setup
+    d = dict(job.__dict__)
+    d.pop("nonce")
+    (tmp_path / "old.json").write_text(json.dumps(d))
+    old = Job.load(tmp_path / "old.json")
+    with pytest.raises(ValueError, match="nonce"):
+        run_job(old, every=EVERY, model=model)

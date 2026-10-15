@@ -22,7 +22,7 @@ import time
 
 from . import registry
 from .backend import SkipLayer
-from .commit import check_reveal, commitment, new_salt
+from .commit import check_reveal, commitment, new_salt, provider_key
 from .dispute import bisect, first_fault, matches_root
 from .indexer import cmd_market
 from .node.cli import add_parser as add_node_parser
@@ -40,6 +40,11 @@ def _checkpoints(trace: dict) -> list[Checkpoint]:
     return [Checkpoint.from_json(c) for c in trace["checkpoints"]]
 
 
+def _binding(a, provider: str) -> bytes:
+    """--binding (the on-chain job account's address, hex), or locally the provider's key."""
+    return bytes.fromhex(a.binding) if a.binding else provider_key(provider)
+
+
 def cmd_job(a) -> int:
     job = new_job(a.model, a.question, a.id)
     job.save(a.out)
@@ -51,7 +56,8 @@ def cmd_job(a) -> int:
 def cmd_run(a) -> int:
     job = Job.load(a.job)
     model = load_model(job.model)
-    r = run_job(job, a.provider, _cheat(a.skip_layer, model), a.every, model=model)
+    r = run_job(job, a.provider, _cheat(a.skip_layer, model), a.every, model=model,
+                binding=_binding(a, a.provider))
     salt = new_salt()
     c = commitment(bytes.fromhex(r.receipt.fingerprint), a.provider, salt)
     r.receipt.extra.update(salt=salt.hex(), commitment=c.hex())   # salt: secret until reveal
@@ -64,9 +70,11 @@ def cmd_run(a) -> int:
     return 0
 
 
-def verify(job: Job, rec: Receipt, every: int = EVERY, trace=None) -> dict:
+def verify(job: Job, rec: Receipt, every: int = EVERY, trace=None, binding=None) -> dict:
     """A verifier's verdict on a receipt: ACCEPT, CHALLENGE (with the fields that differ) or
-    REJECT (the reveal does not open the commitment, or the model build is not the job's)."""
+    REJECT (the reveal does not open the commitment, or the model build is not the job's).
+    binding: the on-chain job account's address (never the receipt's own claim); None: the
+    receipt's provider name's key (local runs)."""
     v = {"provider": rec.provider, "job_id": rec.job_id, "posted": rec.fingerprint}
     if "commitment" in rec.extra and not check_reveal(
             bytes.fromhex(rec.extra["commitment"]), bytes.fromhex(rec.fingerprint),
@@ -75,7 +83,8 @@ def verify(job: Job, rec: Receipt, every: int = EVERY, trace=None) -> dict:
     why = registry.check(job, rec.model_hash)
     if why is not None and "not registered" not in why:
         return v | {"verdict": "REJECT", "why": why}
-    r = run_job(job, "verifier", every=every)
+    bind = provider_key(rec.provider) if binding is None else binding
+    r = run_job(job, "verifier", every=every, binding=bind)
     if trace:
         save_trace(r.log, trace)
     mine = r.receipt
@@ -88,7 +97,8 @@ def verify(job: Job, rec: Receipt, every: int = EVERY, trace=None) -> dict:
 
 
 def cmd_verify(a) -> int:
-    v = verify(Job.load(a.job), Receipt.load(a.receipt), a.every, a.trace)
+    rec = Receipt.load(a.receipt)
+    v = verify(Job.load(a.job), rec, a.every, a.trace, _binding(a, rec.provider))
     if a.json:
         print(json.dumps(v, indent=1))
     elif v["verdict"] == "REJECT":
@@ -103,19 +113,22 @@ def cmd_verify(a) -> int:
 
 
 def dispute(job: Job, provider_cps: list[Checkpoint], model, every: int,
-            replay_cheat=None, out=print):
+            replay_cheat=None, out=print, binding=None):
     """Bisect the provider's checkpoints against the verifier's own run, then replay the
-    window on both sides. (verifier run, divergence, fault)."""
-    mine = run_job(job, "verifier", every=every, model=model)
+    window on both sides (binding: the disputed on-chain job's). (verifier run, divergence,
+    fault)."""
+    mine = run_job(job, "verifier", every=every, model=model, binding=binding)
     d = bisect(mine.log.checkpoints, provider_cps)
     if d is None:
         out("traces agree: nothing to dispute")
         return mine, None, None
     out(f"bisection: checkpoint {d.index} of {len(mine.log.checkpoints)} differs "
         f"({d.rounds} rounds), steps {d.lo + 1}..{d.hi}")
-    honest = run_job(job, "verifier", every=every, window=(d.lo, d.hi), model=model).log.records
-    other = run_job(job, "provider", replay_cheat, every, window=(d.lo, d.hi),
-                    model=model).log.records
+    w = (d.lo, d.hi)
+    honest = run_job(job, "verifier", every=every, window=w, model=model,
+                     binding=binding).log.records
+    other = run_job(job, "provider", replay_cheat, every, window=w, model=model,
+                    binding=binding).log.records
     f = first_fault(honest, other)
     if f is not None:
         out(f"first fault: step {f.step}, slice {f.slice}, pc {f.pc} ({f.what})")
@@ -135,7 +148,7 @@ def cmd_dispute(a) -> int:
                   f"{rec.trace_root}: the provider loses the dispute")
             return 1
     _, d, _ = dispute(job, cps, model, trace.get("every", EVERY),
-                      _cheat(a.replay_skip_layer, model))
+                      _cheat(a.replay_skip_layer, model), binding=_binding(a, a.provider))
     return 0 if d is None else 1
 
 
@@ -172,19 +185,21 @@ def cmd_demo(a) -> int:
     L = layers_of(model[0])
     layer = a.skip_layer if a.skip_layer is not None else L // 2
     say("2. provider A runs it honestly; provider B skips layer", layer, "to save time")
-    ra = run_job(job, "A", every=a.every, model=model)
+    bind = {p: provider_key(p) for p in ("A", "B")}    # (on-chain: each job account's address)
+    ra = run_job(job, "A", every=a.every, model=model, binding=bind["A"])
     say(f"   A: {ra.receipt.answer}  {ra.receipt.fingerprint}")
-    rb = run_job(job, "B", SkipLayer(layer, L), every=a.every, model=model)
+    rb = run_job(job, "B", SkipLayer(layer, L), every=a.every, model=model, binding=bind["B"])
     say(f"   B: {rb.receipt.answer}  {rb.receipt.fingerprint}  "
         f"({rb.receipt.extra['skipped_mms']} matrix multiplies skipped)")
     say("3. a verifier re-runs the job on this laptop")
-    rv = run_job(job, "verifier", every=a.every, model=model)
+    rv = {p: run_job(job, "verifier", every=a.every, model=model, binding=bind[p])
+          for p in ("A", "B")}
     for r in (ra, rb):
-        ok = r.receipt.fingerprint == rv.receipt.fingerprint
+        ok = r.receipt.fingerprint == rv[r.receipt.provider].receipt.fingerprint
         say(f"   {r.receipt.provider}: {'match -> accept' if ok else 'MISMATCH -> challenge'}")
     say("4. searching B's trace for the first instruction that went wrong")
     _, d, f = dispute(job, rb.log.checkpoints, model, a.every, SkipLayer(layer, L),
-                      out=lambda m: say("  ", m))
+                      out=lambda m: say("  ", m), binding=bind["B"])
     say("5. settlement (the Solana program executes these transfers)")
     s = {"A": accept(job.job_id, "A", a.price).to_json(),
          "B": slash(job.job_id, "B", "renter", "verifier", a.price, a.stake).to_json()}
@@ -198,7 +213,7 @@ def cmd_demo(a) -> int:
         with open(a.out, "w") as out:
             json.dump(run, out, indent=1)
         say("   written to", a.out)
-    return 0 if f is not None and ra.receipt.fingerprint == rv.receipt.fingerprint else 1
+    return 0 if f is not None and ra.receipt.fingerprint == rv["A"].receipt.fingerprint else 1
 
 
 def cmd_registry(a) -> int:
@@ -229,6 +244,8 @@ def main(argv=None) -> int:
     r.add_argument("--trace", help="also write the trace's checkpoints here")
     r.add_argument("--skip-layer", type=int, help="cheat: skip this layer's matrix multiplies")
     r.add_argument("--every", type=int, default=EVERY)
+    r.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "
+                   "default: the provider name's key")
     r.set_defaults(fn=cmd_run)
 
     v = sub.add_parser("verify", help="re-run a job and check a receipt")
@@ -237,6 +254,8 @@ def main(argv=None) -> int:
     v.add_argument("--trace", help="also write the verifier's trace here")
     v.add_argument("--every", type=int, default=EVERY)
     v.add_argument("--json", action="store_true", help="print the verdict as JSON")
+    v.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "
+                   "default: the provider name's key (the receipt's provider)")
     v.set_defaults(fn=cmd_verify)
 
     g = sub.add_parser("registry", help="pin a model build's image hash (tdcc_exact/models.json)")
@@ -253,6 +272,9 @@ def main(argv=None) -> int:
     d.add_argument("--receipt", help="the provider's receipt: its trace root must match")
     d.add_argument("--replay-skip-layer", type=int,
                    help="replay the provider's window with this shortcut (local demo)")
+    d.add_argument("--provider", default="A", help="whose job is disputed (its binding)")
+    d.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "
+                   "default: the provider name's key (--provider)")
     d.set_defaults(fn=cmd_dispute)
 
     pr = sub.add_parser("prove", help="one checkpoint of a trace and its Merkle path")

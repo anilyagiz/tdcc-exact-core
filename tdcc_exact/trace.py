@@ -14,6 +14,12 @@ H(0x00 || leaf), nodes as H(0x01 || left || right), an odd level's last node pai
 itself, and the leaf count on top: root = H(0x02 || count || tree root). merkle_proof and
 merkle_verify show one checkpoint against that root.
 
+The chain starts from a 32-byte binding: the address of the on-chain job account the run is
+for (locally, the provider's key). Two on-chain jobs with the same model, prompt and
+parameters (the same Job opened with provider A and with provider B, or a question asked
+again) therefore have different traces and fingerprints, and a fingerprint revealed on one is
+no use on another.
+
 The host's writes into DRAM between runs (the token, its embedding row) and the start of each
 run (its arguments) go into the chain too, so the log covers the inputs as well as the work.
 
@@ -33,6 +39,8 @@ import numpy as np
 DIGEST = 32                      # bytes per hash (SHA-256: Solana's sol_sha256 syscall, so the
                                  # program can recompute commitments and Merkle paths on-chain)
 EVERY = 4096                     # steps between checkpoints
+TAG = b"tdcc-exact/trace/v3"
+UNBOUND = bytes(32)              # a binding for runs that belong to no job (build_hash)
 
 
 def h(*parts: bytes) -> bytes:
@@ -40,6 +48,14 @@ def h(*parts: bytes) -> bytes:
     for p in parts:
         m.update(p)
     return m.digest()
+
+
+def chain_start(binding: bytes) -> bytes:
+    """The chain before the first event: H(tag || binding), binding the on-chain job account
+    (32 bytes: its address), so every job's trace is its own."""
+    if len(binding) != 32:
+        raise ValueError(f"a binding is 32 bytes, not {len(binding)}")
+    return h(TAG, binding)
 
 
 def state_hash(s) -> bytes:
@@ -126,11 +142,15 @@ class StepRecord:
 class TraceLog:
     every: int = EVERY
     window: tuple[int, int] | None = None     # (lo, hi]: record each step's state here
+    binding: bytes = UNBOUND                  # the on-chain job account (see chain_start)
     step: int = 0
-    chain: bytes = field(default_factory=lambda: h(b"tdcc-exact/trace/v2"))
+    chain: bytes = field(init=False)
     checkpoints: list[Checkpoint] = field(default_factory=list)
     records: list[StepRecord] = field(default_factory=list)
     _words: dict = field(default_factory=dict)    # id(program) -> (program, encoded words)
+
+    def __post_init__(self):
+        self.chain = chain_start(self.binding)
 
     # ------------------------------------------------------------- the machine's events
     def observe(self, s, pc: int, slices) -> None:
