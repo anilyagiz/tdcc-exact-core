@@ -27,7 +27,7 @@ from .dispute import Fault, bisect, first_fault, matches_root, output_fault, ver
 from .indexer import cmd_market
 from .node.cli import add_parser as add_node_parser
 from .oracle import (TINY, Job, Receipt, as_binding, build_hash, layers_of, load_model,
-                     load_trace, model_name, new_job, run_job, save_trace)
+                     job_every, load_trace, model_name, new_job, run_job, save_trace)
 from .settle import accept, slash
 from .trace import EVERY, Checkpoint, chain_start, merkle_proof, merkle_root, merkle_verify
 
@@ -46,7 +46,7 @@ def _binding(a, provider: str) -> bytes:
 
 
 def cmd_job(a) -> int:
-    job = new_job(a.model, a.question, a.id)
+    job = new_job(a.model, a.question, a.id, a.every)
     job.save(a.out)
     print(f"job {a.id or '-'}: {len(job.prompt_ids)} prompt tokens, yes={job.yes_id} "
           f"no={job.no_id} -> {a.out}")
@@ -70,7 +70,8 @@ def cmd_run(a) -> int:
     return 0
 
 
-def verify(job: Job, rec: Receipt, every: int = EVERY, trace=None, binding=None) -> dict:
+def verify(job: Job, rec: Receipt, every: int | None = None, trace=None,
+           binding=None) -> dict:
     """A verifier's verdict on a receipt: ACCEPT, CHALLENGE (with the fields that differ) or
     REJECT (the reveal does not open the commitment, or the model build is not the job's).
     binding: the on-chain job account's address (never the receipt's own claim); None: the
@@ -112,12 +113,13 @@ def cmd_verify(a) -> int:
     return 0 if v["verdict"] == "ACCEPT" else 1
 
 
-def dispute(job: Job, provider_cps: list[Checkpoint], model, every: int,
+def dispute(job: Job, provider_cps: list[Checkpoint], model, every: int | None = None,
             replay_cheat=None, out=print, binding=None, receipt: Receipt | None = None):
     """Bisect the provider's checkpoints against the verifier's own run, then replay the
     window on both sides (binding: the disputed on-chain job's). If the traces agree and the
     provider's receipt is given, check the receipt is the one its trace gives (an "output"
     fault, with no divergence). (verifier run, divergence, fault)."""
+    every = job_every(job, every)
     mine = run_job(job, "verifier", every=every, model=model, binding=binding)
     d = bisect(mine.log.checkpoints, provider_cps)
     if d is None:
@@ -165,7 +167,11 @@ def cmd_dispute(a) -> int:
               f"{rec.trace_root}: the provider loses the dispute")
         return 1
     provider = a.provider or (rec.provider if rec is not None else "A")
-    _, d, f = dispute(job, cps, model, trace.get("every", EVERY),
+    if trace.get("every", job.every) != job.every:
+        print(f"the trace's checkpoints are every {trace['every']} steps, the job's every "
+              f"{job.every}: the provider loses the dispute")
+        return 1
+    _, d, f = dispute(job, cps, model, job.every,
                       _cheat(a.replay_skip_layer, model), binding=_binding(a, provider),
                       receipt=rec)
     return 0 if d is None and f is None else 1
@@ -198,7 +204,7 @@ def cmd_demo(a) -> int:
     question = a.question
     model_id = a.model
     say(f"1. renter opens a yes/no oracle job on {model_id}, locks {a.price / 1e6:.2f} USDC")
-    job = new_job(model_id, question, "demo-1")
+    job = new_job(model_id, question, "demo-1", a.every)
     say(f"   Q: {question!r} ({len(job.prompt_ids)} tokens)")
     model = load_model(model_id)
     L = layers_of(model[0])
@@ -254,6 +260,8 @@ def main(argv=None) -> int:
     j.add_argument("--question", required=True)
     j.add_argument("--id", default="")
     j.add_argument("--out", default="job.json")
+    j.add_argument("--every", type=int, default=EVERY,
+                   help="steps between trace checkpoints (part of the job)")
     j.set_defaults(fn=cmd_job)
 
     r = sub.add_parser("run", help="run a job as a provider and post a receipt")
@@ -262,7 +270,7 @@ def main(argv=None) -> int:
     r.add_argument("--out", default="receipt.json")
     r.add_argument("--trace", help="also write the trace's checkpoints here")
     r.add_argument("--skip-layer", type=int, help="cheat: skip this layer's matrix multiplies")
-    r.add_argument("--every", type=int, default=EVERY)
+    r.add_argument("--every", type=int, help="checked against the job's (job new --every)")
     r.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "
                    "default: the provider name's key")
     r.set_defaults(fn=cmd_run)
@@ -271,7 +279,7 @@ def main(argv=None) -> int:
     v.add_argument("--job", required=True)
     v.add_argument("--receipt", required=True)
     v.add_argument("--trace", help="also write the verifier's trace here")
-    v.add_argument("--every", type=int, default=EVERY)
+    v.add_argument("--every", type=int, help="checked against the job's (job new --every)")
     v.add_argument("--json", action="store_true", help="print the verdict as JSON")
     v.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "
                    "default: the provider name's key (the receipt's provider)")

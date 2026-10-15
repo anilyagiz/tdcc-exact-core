@@ -18,7 +18,7 @@ BIND = provider_key("A")      # A's job (the CLI's default binding for provider 
 @pytest.fixture(scope="module")
 def setup():
     model = tiny_model()
-    job = new_job("tiny", "Will it rain tomorrow?", "t1")
+    job = new_job("tiny", "Will it rain tomorrow?", "t1", every=EVERY)
     return job, model, run_job(job, "A", every=EVERY, model=model, binding=BIND)
 
 
@@ -33,7 +33,7 @@ def test_honest_runs_post_the_same_fingerprint(setup):
 
 def test_another_question_changes_the_fingerprint(setup):
     job, model, a = setup
-    other = run_job(new_job("tiny", "Will it snow tomorrow?"), every=EVERY, model=model)
+    other = run_job(new_job("tiny", "Will it snow tomorrow?", every=EVERY), model=model)
     assert other.receipt.fingerprint != a.receipt.fingerprint
 
 
@@ -366,7 +366,7 @@ def test_the_cli_opens_and_runs_a_job(tmp_path, capsys):
     from tdcc_exact.cli import main
     job, rec = tmp_path / "job.json", tmp_path / "a.json"
     assert main(["job", "new", "--question", "Will it rain tomorrow?", "--id", "j1",
-                 "--out", str(job)]) == 0
+                 "--out", str(job), "--every", str(EVERY)]) == 0
     assert main(["run", "--job", str(job), "--provider", "A", "--out", str(rec),
                  "--trace", str(tmp_path / "a.trace.json"), "--every", str(EVERY)]) == 0
     r = json.loads(rec.read_text())
@@ -416,7 +416,7 @@ def test_lfm2_job_is_reproducible_and_a_skipped_layer_is_seen():
 # ------------------------------------------------------------------ cross-job replay
 def test_the_same_question_twice_gets_different_digests(setup):
     job, model, a = setup
-    job2 = new_job("tiny", job.question, "t2")
+    job2 = new_job("tiny", job.question, "t2", every=EVERY)
     assert job2.prompt_ids == job.prompt_ids and job2.nonce != job.nonce
     assert job2.digest != job.digest
     b = run_job(job2, "A", every=EVERY, model=model)
@@ -646,3 +646,30 @@ def test_a_provider_whose_window_does_not_chain_loses_the_dispute(setup):
     _, d, f = dispute(job, b.log.checkpoints, model, EVERY, SkipLayer(1, L),
                       out=print, binding=BIND)
     assert f is not None and f.what == "state"
+
+
+# ------------------------------------------------------------------ the checkpoint interval
+def test_the_checkpoint_interval_is_part_of_the_job(setup, tmp_path, capsys):
+    """A provider at another interval than the verifier's would never match: the interval is
+    in the job (and its digest), and a run or a trace at another one is refused."""
+    import dataclasses
+    import json
+    from tdcc_exact.cli import main
+    from tdcc_exact.oracle import save_trace
+    job, model, a = setup
+    assert job.every == EVERY
+    assert dataclasses.replace(job, every=1024).digest != job.digest
+    with pytest.raises(ValueError, match="every"):
+        run_job(job, "A", every=4096, model=model, binding=BIND)
+    job.save(tmp_path / "job.json")
+    a.receipt.save(tmp_path / "a.json")
+    base = ["--job", str(tmp_path / "job.json")]
+    assert main(["verify", *base, "--receipt", str(tmp_path / "a.json")]) == 0   # job's own
+    assert main(["verify", *base, "--receipt", str(tmp_path / "a.json"),
+                 "--every", "4096"]) == 2
+    save_trace(a.log, tmp_path / "a.trace.json")
+    t = json.loads((tmp_path / "a.trace.json").read_text())
+    t["every"] = 4096
+    (tmp_path / "a.trace.json").write_text(json.dumps(t))
+    assert main(["dispute", *base, "--trace", str(tmp_path / "a.trace.json")]) == 1
+    assert "every" in capsys.readouterr().out

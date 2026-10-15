@@ -47,6 +47,8 @@ class Job:
     chunk: int = 8               # prompt tokens per device run (Engine.prefill: the trace's shape)
     job_id: str = ""
     nonce: str = ""              # 32 random bytes (hex), chosen by new_job: in the digest
+    every: int = EVERY           # steps between trace checkpoints: the trace's shape, so a
+                                 # provider and a verifier must agree on it (in the digest)
 
     @property
     def digest(self) -> bytes:
@@ -65,6 +67,8 @@ class Job:
             raise ValueError("the prompt is empty")
         if self.chunk < 1:
             raise ValueError(f"chunk {self.chunk} is not a positive token count")
+        if self.every < 1:
+            raise ValueError(f"every {self.every} is not a positive step count")
         if len(self.prompt_ids) > self.cap:
             raise ValueError(f"{len(self.prompt_ids)} prompt tokens do not fit a KV cache of "
                              f"{self.cap}")
@@ -203,12 +207,13 @@ def layers_of(spec) -> int:
 
 
 # ------------------------------------------------------------------------------- jobs
-def new_job(model: str, question: str, job_id: str = "") -> Job:
-    """An oracle job: the question in the model's chat template, answered Yes or No."""
+def new_job(model: str, question: str, job_id: str = "", every: int = EVERY) -> Job:
+    """An oracle job: the question in the model's chat template, answered Yes or No (every:
+    the trace's checkpoint interval)."""
     if is_tiny(model):
         ids = [1 + (b % 500) for b in question.encode()][:24] or [1]
         return Job(model, ids, yes_id=3, no_id=4, question=question, job_id=job_id,
-                   nonce=new_nonce())
+                   nonce=new_nonce(), every=every)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(model)
     msg = [{"role": "system", "content": "Answer with exactly one word: Yes or No."},
@@ -220,7 +225,8 @@ def new_job(model: str, question: str, job_id: str = "") -> Job:
     yes, no = (tok.encode(w, add_special_tokens=False) for w in ("Yes", "No"))
     if yes[0] == no[0]:
         raise ValueError(f"{model}: 'Yes' / 'No' start with the same token ({yes}, {no})")
-    return Job(model, ids, yes[0], no[0], question=question, job_id=job_id, nonce=new_nonce())
+    return Job(model, ids, yes[0], no[0], question=question, job_id=job_id, nonce=new_nonce(),
+               every=every)
 
 
 @dataclass
@@ -248,16 +254,27 @@ def as_binding(binding) -> bytes:
     return b
 
 
+def job_every(job: Job, every: int | None) -> int:
+    """The job's checkpoint interval; `every`, if given, must be it (a trace at another
+    interval has other checkpoints, so it could never match the job's)."""
+    if every is not None and int(every) != job.every:
+        raise ValueError(f"checkpoints every {every} steps, but the job says every "
+                         f"{job.every} (the interval is part of the job)")
+    return job.every
+
+
 def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
-            every: int = EVERY, window=None, model=None, binding=None,
+            every: int | None = None, window=None, model=None, binding=None,
             reveal: int | None = None) -> Run:
     """Run `job` on a traced Exact Core simulator (cheat: a dishonest provider's shortcut;
-    window: (lo, hi], record each step there for a dispute; reveal: a checkpoint index,
-    record every event up to it in log.events, for dispute.verify_window; binding: the
+    every: None, or the job's own checkpoint interval (another is an error); window:
+    (lo, hi], record each step there for a dispute; reveal: a checkpoint index, record
+    every event up to it in log.events, for dispute.verify_window; binding: the
     on-chain job account's 32-byte address, the trace's first input; None: UNBOUND, for
     local tries only)."""
     from opentpu.llm.qwen3 import Engine    # (every Spec's engine: Qwen3, LFM2, ...)
     job.check_nonce()
+    every = job_every(job, every)
     bind = as_binding(binding)
     spec, W = model if model is not None else load_model(job.model)
     job.check(getattr(spec, "vocab", None))
