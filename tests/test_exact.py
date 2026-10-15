@@ -158,6 +158,45 @@ def test_a_provider_running_fp4_instead_of_int8_is_caught(setup):
     assert cheap.receipt.fingerprint != a.receipt.fingerprint
 
 
+def test_a_provider_running_other_weights_is_caught(setup):
+    """A smaller or cheaper model in place of the job's: same shape, other weights."""
+    from tdcc_exact import registry
+    job, _, a = setup
+    other = run_job(job, "B", every=EVERY, model=tiny_model(1))
+    assert other.receipt.model_hash != a.receipt.model_hash
+    assert registry.check(job, other.receipt.model_hash) is not None
+    assert other.receipt.fingerprint != a.receipt.fingerprint
+
+
+def test_a_provider_skipping_prompt_tokens_is_caught(setup):
+    """Feeding fewer prompt tokens saves work; even with the job's digest forged into the
+    fingerprint, the trace root differs."""
+    import dataclasses
+    job, model, a = setup
+    short = run_job(dataclasses.replace(job, prompt_ids=job.prompt_ids[:-4]), "B",
+                    every=EVERY, model=model)
+    assert short.receipt.trace_root != a.receipt.trace_root
+    assert short.receipt.steps < a.receipt.steps
+    assert short.receipt.fingerprint != a.receipt.fingerprint
+
+
+def test_a_receipt_with_no_run_behind_it_is_challenged(setup, tmp_path):
+    """An answer posted without running anything, the rest of A's receipt copied: the
+    verifier's re-run (tdcc-exact verify) challenges it, and accepts A's own."""
+    import dataclasses
+    import os
+    from tdcc_exact.cli import main
+    job, _, a = setup
+    job.save(tmp_path / "job.json")
+    a.receipt.save(tmp_path / "a.json")
+    forged = dataclasses.replace(a.receipt, provider="B", fingerprint=os.urandom(32).hex(),
+                                 extra={})
+    forged.save(tmp_path / "b.json")
+    verify = ["verify", "--job", str(tmp_path / "job.json"), "--every", str(EVERY)]
+    assert main(verify + ["--receipt", str(tmp_path / "a.json")]) == 0
+    assert main(verify + ["--receipt", str(tmp_path / "b.json")]) == 1
+
+
 LFM2 = Path(__file__).resolve().parents[1] / "models" / "LFM2.5-230M"
 
 
