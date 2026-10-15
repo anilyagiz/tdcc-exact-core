@@ -205,3 +205,10 @@ def test_a_dismissed_challenge_cannot_be_raised_again(world):
     with pytest.raises(ChainError, match="AlreadyChallenged"):
         w["rpc"].send(again, w["admin"], w["verifier"])
     assert m.job(job).state == "Challenged"            # the transaction rolled back whole
+
+
+def test_a_job_must_pay_something(world):
+    """A free job would let anyone tie up a provider (an open job locks its stake) for nothing."""
+    w, m = world, world["m"]
+    with pytest.raises(ChainError, match="BadParams"):
+        m.open_job(w["renter"], w["a"].pubkey(), 9_999, bytes(32), MODEL, 0)

@@ -165,6 +165,8 @@ pub mod tdcc_exact {
     ) -> Result<()> {
         let c = &ctx.accounts.config;
         let p = &ctx.accounts.provider;
+        // a free job would tie up a provider (an open job locks its stake) at no cost
+        require!(price > 0, ExactError::BadParams);
         require!(
             p.stake >= c.min_stake && p.unlock_slot == 0,
             ExactError::ProviderNotStaked
