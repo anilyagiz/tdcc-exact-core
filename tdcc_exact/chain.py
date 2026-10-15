@@ -3,8 +3,11 @@
     pip install -e '.[chain]'          (solders; the RPC calls are plain JSON over HTTP)
 
 Market(rpc, admin) is one market instance: the program's config PDA is seeded by the admin's
-key, so anyone can start their own (a test USDC mint, a treasury, the windows). Its methods
-send one transaction each and return the signature; `link(sig)` is its Solana Explorer page.
+key, so anyone can start their own (a test USDC mint, a treasury, the windows). Each method
+named after an instruction sends one transaction and returns its signature (`open_job` and
+`create_mint` also return the account they made); `job`, `provider` and `balance` read
+accounts and send nothing. `link(sig)` is a signature's Solana Explorer page
+(`link(key, "address")` an account's).
 
 Keypairs live outside the repository, in ~/.config/tdcc-exact/<cluster>/<name>.json, created on
 first use. On devnet the admin is funded by an airdrop (or by hand at faucet.solana.com) and

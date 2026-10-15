@@ -175,7 +175,7 @@ def test_digest_is_256_bits():
     assert DIGEST == 32 and len(h(b"x")) == 32
 
 
-COMMIT_VECTOR = {   # programs/tdcc_exact/tests checks the same hash
+COMMIT_VECTOR = {   # the program checks the same hash (programs/tdcc_exact/src/lib.rs, tests)
     "fingerprint": "11" * 32, "provider": "22" * 32, "salt": "33" * 32,
     "commitment": "00ccd4f49b63c10bc652bb5eab7217fa9a073baa49f8818e68fa47fcb64fa255"}
 

@@ -194,7 +194,7 @@ def test_unstake_waits_for_the_cooldown_and_the_open_jobs(world):
 
 def test_a_dismissed_challenge_cannot_be_raised_again(world):
     """dismiss and a new challenge in one transaction (so in one slot, where the challenge
-    window is still open): the arbiter's ruling stands, the job settles."""
+    window is still open): the challenge is refused, and the whole transaction with it."""
     from tdcc_exact.chain import R, S, W, b32
     w, m = world, world["m"]
     job = _open(w, w["a"])
