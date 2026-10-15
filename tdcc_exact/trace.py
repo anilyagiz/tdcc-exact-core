@@ -4,10 +4,15 @@ Every instruction the simulator steps extends a hash chain:
 
     chain[i] = H(chain[i-1] || slice || pc || the instruction's 8 words || R0..R15 after it)
 
-and every `every` steps, and at the end of each device run, the log takes a checkpoint: the
-chain so far and a hash of each slice's working state (TMEM, ACT RAM and its scales, the
-registers, the pc). A checkpoint's leaf is H(step || chain || state). The leaves' Merkle root
-is the trace root a provider posts with its answer.
+and every `every` steps, and at the end of each device run, the log takes a checkpoint: a
+hash of each slice's working state (TMEM, ACT RAM and its scales, the registers, the pc) is
+folded into the chain (chain = H(chain || "C" || state)), and the checkpoint keeps the step
+count, that chain and the state hash. A checkpoint's leaf is H(step || chain || state).
+
+The trace root a provider posts is a Merkle tree over the leaves: leaves hashed as
+H(0x00 || leaf), nodes as H(0x01 || left || right), an odd level's last node paired with
+itself, and the leaf count on top: root = H(0x02 || count || tree root). merkle_proof and
+merkle_verify show one checkpoint against that root.
 
 The host's writes into DRAM between runs (the token, its embedding row) and the start of each
 run (its arguments) go into the chain too, so the log covers the inputs as well as the work.
