@@ -124,6 +124,14 @@ jobs:
           solana-test-validator --reset --quiet --ledger /tmp/ledger \
             --bpf-program HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A \
             target/deploy/tdcc_exact.so &
-          for i in $(seq 60); do solana -ul cluster-version && break; sleep 1; done
+          up=
+          for i in $(seq 60); do
+            if solana -ul cluster-version; then up=1; break; fi
+            sleep 1
+          done
+          if [ -z "$up" ]; then
+            echo "::error::solana-test-validator did not answer on localhost within 60 s"
+            exit 1
+          fi
           TDCC_EXACT_REQUIRE_CHAIN=1 python -m pytest -q tests/test_chain.py
           TDCC_EXACT_KEYS=/tmp/keys tdcc-exact demo --localnet --commit-window 60 --challenge-window 30
