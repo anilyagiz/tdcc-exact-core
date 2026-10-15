@@ -459,3 +459,33 @@ def test_a_dismissal_keeps_the_challenge_deadline(world):
     with pytest.raises(ChainError, match="WindowClosed"):       # after it: no new challenge
         m.challenge(v2, job, b"\x1d" * 32)
     m.settle(w["admin"], job)
+
+
+def test_a_finished_job_closes_and_the_rent_goes_back_to_the_renter(world):
+    w, m, rpc = world, world["m"], world["rpc"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x1e" * 32)
+    with pytest.raises(ChainError, match="WrongState"):             # still live: no close
+        m.close_job(job, w["verifier"])
+    rpc.wait_slot(m.job(job).challenge_deadline)
+    m.settle(w["admin"], job)
+    rent, r0 = rpc.balance(job), rpc.balance(w["renter"].pubkey())
+    assert rent > 0
+    sig = m.close_job(job, w["verifier"])                            # anyone may close it
+    assert _events(w, sig) == ["JobClosed"]
+    assert rpc.account(job) is None
+    assert rpc.balance(w["renter"].pubkey()) - r0 == rent           # to the renter, not the caller
+
+
+def test_close_job_pays_only_the_renter(world):
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    w["rpc"].wait_slot(m.job(job).reveal_deadline)
+    m.expire(w["renter"], job)
+    from tdcc_exact.chain import R, S, W
+    steal = m._ix("close_job", [S(w["verifier"].pubkey()), R(m.config), W(job),
+                                W(w["verifier"].pubkey())])
+    with pytest.raises(ChainError, match="ConstraintHasOne"):
+        w["rpc"].send([steal], w["verifier"])
+    m.close_job(job, w["renter"])
+    assert w["rpc"].account(job) is None

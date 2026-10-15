@@ -23,7 +23,8 @@
 //! or dismiss; after that anyone may dismiss and the receipt stands.
 //!
 //! A provider that commits but never reveals (or never commits) lets the renter take the
-//! escrow back after the reveal deadline (`expire`).
+//! escrow back after the reveal deadline (`expire`). A finished job (Settled, Slashed, Expired)
+//! can be closed by anyone with `close_job`; its rent goes back to the renter.
 //!
 //! The receipt is posted in two phases against the copy attack (tdcc_exact/commit.py): honest
 //! runs post the same fingerprint, so the provider first commits to
@@ -538,6 +539,25 @@ pub mod tdcc_exact {
         });
         Ok(())
     }
+
+    /// A finished job (Settled, Slashed or Expired) holds nothing but rent: anyone may close it
+    /// and the rent goes back to the renter who paid it.
+    pub fn close_job(ctx: Context<CloseJob>) -> Result<()> {
+        let j = &ctx.accounts.job;
+        require!(
+            matches!(
+                j.state,
+                JobState::Settled | JobState::Slashed | JobState::Expired
+            ),
+            ExactError::WrongState
+        );
+        emit!(JobClosed {
+            job: j.key(),
+            renter: j.renter,
+            rent: j.to_account_info().lamports()
+        });
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------------------- token moves
@@ -867,6 +887,18 @@ pub struct Expire<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct CloseJob<'info> {
+    pub caller: Signer<'info>, // anyone: the rent goes to the renter either way
+    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut, has_one = config, has_one = renter, close = renter)]
+    pub job: Account<'info, Job>,
+    /// CHECK: only receives the job's lamports; it is the job's renter (has_one above)
+    #[account(mut)]
+    pub renter: UncheckedAccount<'info>,
+}
+
 // ------------------------------------------------------------------------- events, errors
 #[event]
 pub struct Initialized {
@@ -904,6 +936,13 @@ pub struct Expired {
     pub job: Pubkey,
     pub renter: Pubkey,
     pub refunded: u64,
+}
+
+#[event]
+pub struct JobClosed {
+    pub job: Pubkey,
+    pub renter: Pubkey,
+    pub rent: u64, // lamports back to the renter
 }
 
 #[event]

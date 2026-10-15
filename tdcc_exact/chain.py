@@ -528,6 +528,14 @@ class Market:
                                         W(self.vault), W(ata(j.renter, self.mint)),
                                         R(TOKEN_PROGRAM)])], payer)
 
+    def close_job(self, job: Pubkey, caller: Keypair | None = None) -> str:
+        """Close a Settled, Slashed or Expired job; its rent goes back to the renter."""
+        caller = caller or self.admin
+        j = self.job(job)
+        return self.rpc.send([self._ix("close_job",
+                                       [S(caller.pubkey()), R(self.config), W(job),
+                                        W(j.renter)])], caller)
+
     def balance(self, owner: Pubkey) -> int:
         return self.rpc.token_balance(ata(owner, self.mint))
 

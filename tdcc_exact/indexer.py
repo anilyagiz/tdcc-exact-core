@@ -101,6 +101,7 @@ EVENTS: dict[str, list[tuple[str, str]]] = {
     "UnstakeRequested": [("provider", "pubkey"), ("unlock_slot", "u64")],
     "Unstaked": [("provider", "pubkey"), ("amount", "u64")],
     "Expired": [("job", "pubkey"), ("renter", "pubkey"), ("refunded", "u64")],
+    "JobClosed": [("job", "pubkey"), ("renter", "pubkey"), ("rent", "u64")],
     "Staked": [("provider", "pubkey"), ("amount", "u64"), ("stake", "u64")],
     "JobOpened": [("job", "pubkey"), ("renter", "pubkey"), ("provider", "pubkey"),
                   ("price", "u64"), ("job_digest", "bytes32")],
