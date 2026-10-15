@@ -8,7 +8,7 @@ from tdcc_exact.backend import SkipLayer
 from tdcc_exact.dispute import bisect, first_fault
 from tdcc_exact.oracle import layers_of, new_job, run_job, tiny_model
 from tdcc_exact.settle import accept, slash
-from tdcc_exact.trace import merkle_root
+from tdcc_exact.trace import StepRecord, merkle_root
 
 EVERY = 512
 
@@ -58,6 +58,19 @@ def test_a_skipped_layer_is_caught_at_the_skipped_instruction(setup):
 def test_bisect_agrees_on_equal_traces(setup):
     _, _, a = setup
     assert bisect(a.log.checkpoints, list(a.log.checkpoints)) is None
+
+
+def _rec(i):
+    return StepRecord(i, 0, i, "w", f"I{i}", f"c{i}", f"s{i}")
+
+
+def test_first_fault_names_the_step_only_one_side_ran():
+    two, three = [_rec(1), _rec(2)], [_rec(1), _rec(2), _rec(3)]
+    f = first_fault(two, three)              # the other run did one step more
+    assert (f.step, f.honest, f.other) == (3, "(ended)", "I3")
+    f = first_fault(three, two)              # the other run stopped one step early
+    assert (f.step, f.honest, f.other) == (3, "I3", "(ended)")
+    assert first_fault(two, list(two)) is None
 
 
 def test_merkle_root_commits_to_order():

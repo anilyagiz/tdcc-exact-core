@@ -60,8 +60,11 @@ def first_fault(honest, other) -> Fault | None:
             return Fault(x.step, x.slice, x.pc, x.instr, y.instr, "control")
         if x.state != y.state or x.chain != y.chain:
             return Fault(x.step, x.slice, x.pc, x.instr, y.instr, "state")
-    if len(honest) != len(other):
+    if len(honest) != len(other):        # one side ran a step the other never did
         k = min(len(honest), len(other))
-        x = (honest or other)[min(k, len(honest or other) - 1)]
-        return Fault(x.step, x.slice, x.pc, x.instr, "(ended)", "control")
+        if len(honest) > k:
+            x = honest[k]
+            return Fault(x.step, x.slice, x.pc, x.instr, "(ended)", "control")
+        y = other[k]
+        return Fault(y.step, y.slice, y.pc, "(ended)", y.instr, "control")
     return None
