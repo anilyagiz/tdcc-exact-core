@@ -18,7 +18,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: System :: Hardware",
 ]
-dependencies = ["numpy", "textual"]
+dependencies = ["numpy"]
 
 [project.urls]
 Homepage = "https://github.com/anilyagiz/tdcc-exact-core"
@@ -28,6 +28,8 @@ Upstream = "https://github.com/FeSens/openTPU"
 
 [project.optional-dependencies]
 chain = ["solders>=0.21"]
+# upstream openTPU's full-screen chat (otpu-chat, opentpu/host/chat_tui.py); tdcc-exact does not use it
+tui = ["textual"]
 # real checkpoints (models/LFM2.5-230M): the tokenizer's chat template, the safetensors reader
 model = ["transformers", "jinja2", "huggingface_hub", "safetensors", "torch"]
 
