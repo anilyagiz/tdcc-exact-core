@@ -23,6 +23,10 @@ from tdcc_exact.settle import accept, dismiss, slash  # noqa: E402
 URL = os.environ.get("TDCC_EXACT_RPC", "http://127.0.0.1:8899")
 PRICE, STAKE = 2_000_001, 50_000_001          # odd: the rounding is the program's
 BOND = 1_000_003
+# windows in slots (~0.4 s each): wide enough that a loaded runner still commits, reveals and
+# challenges inside them (4 slots flaked), short enough to keep the suite quick
+WORLD = Params(commit_window=10, challenge_window=8, arbiter_window=6, unstake_cooldown=4,
+               challenge_bond=BOND)
 MODEL = bytes([7]) * 32
 
 
@@ -49,9 +53,7 @@ def world():
     for k in (admin, renter, verifier, a, b, c):
         rpc.airdrop(k.pubkey(), 2_000_000_000)
     m = Market(rpc, admin, "localnet")
-    m.initialize(treasury.pubkey(), Params(commit_window=4, challenge_window=4,
-                                           unstake_cooldown=4, challenge_bond=BOND,
-                                           arbiter_window=4))
+    m.initialize(treasury.pubkey(), WORLD)
     for p in (a, b, c):
         m.mint_to(p.pubkey(), STAKE)
         m.register_provider(p)
@@ -346,7 +348,7 @@ def test_silent_arbiter_lets_anyone_dismiss_after_the_ruling_deadline(world):
     _post(w, w["a"], job, b"\x0c" * 32)
     m.challenge(w["verifier"], job, b"\x0d" * 32)
     j = m.job(job)
-    assert j.ruling_deadline == j.challenge_slot + 4
+    assert j.ruling_deadline == j.challenge_slot + WORLD.arbiter_window
     with pytest.raises(ChainError, match="ArbiterWindowOpen"):   # the arbiter's turn
         m.dismiss(job, w["renter"])
     w["rpc"].wait_slot(j.ruling_deadline)
