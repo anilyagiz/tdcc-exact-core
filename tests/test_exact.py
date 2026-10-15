@@ -266,6 +266,20 @@ def test_the_verdict_names_what_differs(setup):
     assert verify(job, lied, EVERY)["verdict"] == "REJECT"   # the reveal does not open it
 
 
+def test_prove_prints_a_path_to_the_posted_root(setup, tmp_path, capsys):
+    import json
+    from tdcc_exact.cli import main
+    from tdcc_exact.oracle import save_trace
+    _, _, a = setup
+    save_trace(a.log, tmp_path / "a.trace.json")
+    assert main(["prove", "--trace", str(tmp_path / "a.trace.json"), "--index", "1"]) == 0
+    p = json.loads(capsys.readouterr().out)
+    assert p["root"] == a.receipt.trace_root
+    assert merkle_verify(bytes.fromhex(p["leaf"]), 1, p["count"],
+                         [bytes.fromhex(x) for x in p["path"]], bytes.fromhex(p["root"]))
+    assert main(["prove", "--trace", str(tmp_path / "a.trace.json"), "--index", "99"]) == 1
+
+
 def test_the_verifier_needs_no_fcntl():
     """Verifiers run on any laptop, Windows included: nothing on tdcc-exact's path may import
     fcntl (only the card and RTL hosts in opentpu/ do)."""

@@ -5,6 +5,7 @@
     tdcc-exact verify --job job.json --receipt a.json
     tdcc-exact dispute --job job.json --trace b.trace.json [--receipt b.json]
                        [--replay-skip-layer K]
+    tdcc-exact prove --trace b.trace.json --index 1
     tdcc-exact demo [--model models/LFM2.5-230M] [--devnet | --localnet]
     tdcc-exact registry add --model tiny [--wformat int8 --cap 256]
 """
@@ -22,7 +23,7 @@ from .dispute import bisect, first_fault, matches_root
 from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
                      model_name, new_job, run_job, save_trace)
 from .settle import accept, slash
-from .trace import EVERY, Checkpoint
+from .trace import EVERY, Checkpoint, merkle_proof, merkle_root, merkle_verify
 
 
 def _cheat(layer, model) -> SkipLayer | None:
@@ -132,6 +133,22 @@ def cmd_dispute(a) -> int:
     return 0 if d is None else 1
 
 
+def cmd_prove(a) -> int:
+    """One checkpoint of a trace with its Merkle path to the trace root: what a bisection
+    round shows instead of the whole list."""
+    cps = _checkpoints(load_trace(a.trace))
+    leaves = [c.leaf for c in cps]
+    if not 0 <= a.index < len(cps):
+        print(f"the trace has {len(cps)} checkpoints; no index {a.index}", file=sys.stderr)
+        return 1
+    root, path = merkle_root(leaves), merkle_proof(leaves, a.index)
+    assert merkle_verify(leaves[a.index], a.index, len(leaves), path, root)
+    print(json.dumps({"index": a.index, "count": len(cps), "root": root.hex(),
+                      "checkpoint": cps[a.index].to_json(), "leaf": leaves[a.index].hex(),
+                      "path": [x.hex() for x in path]}, indent=1))
+    return 0
+
+
 def cmd_demo(a) -> int:
     if a.devnet or a.localnet:
         from .chain_demo import run
@@ -229,6 +246,11 @@ def main(argv=None) -> int:
     d.add_argument("--replay-skip-layer", type=int,
                    help="replay the provider's window with this shortcut (local demo)")
     d.set_defaults(fn=cmd_dispute)
+
+    pr = sub.add_parser("prove", help="one checkpoint of a trace and its Merkle path")
+    pr.add_argument("--trace", required=True)
+    pr.add_argument("--index", type=int, required=True)
+    pr.set_defaults(fn=cmd_prove)
 
     m = sub.add_parser("demo", help="the hackathon demo, end to end")
     m.add_argument("--model", default=TINY, help="tiny, or a checkpoint (models/LFM2.5-230M)")
