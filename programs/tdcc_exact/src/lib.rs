@@ -8,11 +8,12 @@
 //!                   commit_deadline)    commit_deadline)    challenge window)
 //!                                            │
 //!                                            └──► challenge ──► slash      (arbiter: refund the
-//!                                                 (verifier)    │           renter, half the stake
-//!                                                               │           to the verifier, the
-//!                                                               │           rest to TDCC)
+//!                                                 (verifier,    │           renter, half the stake
+//!                                                  posts a      │           and the bond back to
+//!                                                  bond)        │           the verifier, the rest
+//!                                                               │           to TDCC)
 //!                                                               └──► dismiss ──► settle
-//!                                                                    (one challenge per job)
+//!                                                                    (the bond to the provider)
 //! ```
 //!
 //! A provider that commits but never reveals (or never commits) lets the renter take the
@@ -80,6 +81,7 @@ pub mod tdcc_exact {
             params.commit_window > 0 && params.challenge_window > 0 && params.min_stake > 0,
             ExactError::BadParams
         );
+        require!(params.challenge_bond > 0, ExactError::BadParams);
         let c = &mut ctx.accounts.config;
         c.admin = ctx.accounts.admin.key();
         c.mint = ctx.accounts.mint.key();
@@ -91,6 +93,7 @@ pub mod tdcc_exact {
         c.challenge_window = params.challenge_window;
         c.min_stake = params.min_stake;
         c.unstake_cooldown = params.unstake_cooldown;
+        c.challenge_bond = params.challenge_bond;
         c.bump = ctx.bumps.config;
         c.vault_bump = ctx.bumps.vault;
         emit!(Initialized {
@@ -225,6 +228,7 @@ pub mod tdcc_exact {
         j.checkpoints = 0;
         j.verifier = Pubkey::default();
         j.verifier_fingerprint = [0; 32];
+        j.bond = 0;
         j.bump = ctx.bumps.job;
         let p = &mut ctx.accounts.provider;
         p.open_jobs = p.open_jobs.checked_add(1).ok_or(ExactError::Overflow)?;
@@ -290,8 +294,12 @@ pub mod tdcc_exact {
         Ok(())
     }
 
+    /// A verifier disputes a revealed receipt and puts up the config's challenge bond: it comes
+    /// back with the verifier's share if the provider is slashed, and goes to the provider (for
+    /// the delay) if the challenge is dismissed, so challenging costs something when wrong.
     pub fn challenge(ctx: Context<Challenge>, fingerprint: [u8; 32]) -> Result<()> {
-        let j = &mut ctx.accounts.job;
+        let bond = ctx.accounts.config.challenge_bond;
+        let j = &ctx.accounts.job;
         require!(j.state == JobState::Revealed, ExactError::WrongState);
         require!(
             Clock::get()?.slot <= j.challenge_deadline,
@@ -300,13 +308,25 @@ pub mod tdcc_exact {
         require!(fingerprint != j.fingerprint, ExactError::SameFingerprint);
         // one challenge per job: once the arbiter dismissed one, the receipt stands
         require!(j.verifier == Pubkey::default(), ExactError::AlreadyChallenged);
+        let a = &ctx.accounts;
+        pay_in(
+            &a.token_program,
+            &a.from,
+            &a.vault,
+            &a.mint,
+            &a.verifier,
+            bond,
+        )?;
+        let j = &mut ctx.accounts.job;
         j.verifier = ctx.accounts.verifier.key();
         j.verifier_fingerprint = fingerprint;
+        j.bond = bond;
         j.state = JobState::Challenged;
         emit!(Challenged {
             job: j.key(),
             verifier: j.verifier,
-            fingerprint
+            fingerprint,
+            bond
         });
         Ok(())
     }
@@ -358,6 +378,7 @@ pub mod tdcc_exact {
         require!(divergence_index <= j.checkpoints, ExactError::BadParams);
         let stake = ctx.accounts.provider.stake;
         let (to_verifier, to_tdcc) = math::slash(stake, c.verifier_bps);
+        let bond = j.bond;
         let price = j.price;
         let a = &ctx.accounts;
         pay_out(
@@ -374,7 +395,9 @@ pub mod tdcc_exact {
             &a.verifier_token,
             &a.mint,
             &a.config,
-            to_verifier,
+            to_verifier
+                .checked_add(bond)
+                .ok_or(ExactError::Overflow)?,
         )?;
         pay_out(
             &a.token_program,
@@ -387,6 +410,7 @@ pub mod tdcc_exact {
         let job_key = ctx.accounts.job.key();
         let verifier = ctx.accounts.job.verifier;
         ctx.accounts.job.state = JobState::Slashed;
+        ctx.accounts.job.bond = 0;
         let p = &mut ctx.accounts.provider;
         p.stake = 0;
         p.open_jobs = p.open_jobs.saturating_sub(1);
@@ -399,19 +423,34 @@ pub mod tdcc_exact {
             to_tdcc,
             divergence_index,
             fault_step,
+            bond,
         });
         Ok(())
     }
 
-    /// The arbiter found the challenge wrong: the job settles as if unchallenged.
+    /// The arbiter found the challenge wrong: the job settles as if unchallenged, and the
+    /// verifier's bond goes to the provider.
     pub fn dismiss(ctx: Context<Dismiss>) -> Result<()> {
-        let j = &mut ctx.accounts.job;
+        let j = &ctx.accounts.job;
         require!(j.state == JobState::Challenged, ExactError::WrongState);
+        let bond = j.bond;
+        let a = &ctx.accounts;
+        pay_out(
+            &a.token_program,
+            &a.vault,
+            &a.provider_token,
+            &a.mint,
+            &a.config,
+            bond,
+        )?;
+        let j = &mut ctx.accounts.job;
         j.state = JobState::Revealed;
         j.challenge_deadline = Clock::get()?.slot;
+        j.bond = 0;
         emit!(Dismissed {
             job: j.key(),
-            verifier: j.verifier
+            verifier: j.verifier,
+            bond
         });
         Ok(())
     }
@@ -512,6 +551,7 @@ pub struct ConfigParams {
     pub challenge_window: u64,
     pub min_stake: u64,
     pub unstake_cooldown: u64,
+    pub challenge_bond: u64,
 }
 
 #[account]
@@ -527,6 +567,7 @@ pub struct Config {
     pub challenge_window: u64,
     pub min_stake: u64,
     pub unstake_cooldown: u64,
+    pub challenge_bond: u64, // a verifier's deposit per challenge
     pub bump: u8,
     pub vault_bump: u8,
 }
@@ -573,6 +614,7 @@ pub struct Job {
     pub checkpoints: u32,
     pub verifier: Pubkey,
     pub verifier_fingerprint: [u8; 32],
+    pub bond: u64, // the challenger's bond, held in the vault while Challenged
     pub bump: u8,
 }
 
@@ -677,8 +719,16 @@ pub struct ProviderJob<'info> {
 #[derive(Accounts)]
 pub struct Challenge<'info> {
     pub verifier: Signer<'info>,
-    #[account(mut, constraint = job.provider != verifier.key() @ ExactError::NotYourJob)]
+    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = mint, has_one = vault)]
+    pub config: Account<'info, Config>,
+    #[account(mut, has_one = config, constraint = job.provider != verifier.key() @ ExactError::NotYourJob)]
     pub job: Account<'info, Job>,
+    pub mint: Account<'info, Mint>,
+    #[account(mut, token::mint = mint, token::authority = verifier)]
+    pub from: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub vault: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
@@ -725,10 +775,17 @@ pub struct Slash<'info> {
 #[derive(Accounts)]
 pub struct Dismiss<'info> {
     pub admin: Signer<'info>,
-    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = admin)]
+    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = admin, has_one = mint,
+              has_one = vault)]
     pub config: Account<'info, Config>,
     #[account(mut, has_one = config)]
     pub job: Account<'info, Job>,
+    pub mint: Account<'info, Mint>,
+    #[account(mut)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(mut, token::mint = mint, token::authority = job.provider)]
+    pub provider_token: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
@@ -814,6 +871,7 @@ pub struct Challenged {
     pub job: Pubkey,
     pub verifier: Pubkey,
     pub fingerprint: [u8; 32],
+    pub bond: u64,
 }
 
 #[event]
@@ -834,12 +892,14 @@ pub struct Slashed {
     pub to_tdcc: u64,
     pub divergence_index: u32,
     pub fault_step: u64,
+    pub bond: u64, // returned to the verifier with its share
 }
 
 #[event]
 pub struct Dismissed {
     pub job: Pubkey,
     pub verifier: Pubkey,
+    pub bond: u64, // paid to the provider
 }
 
 #[error_code]

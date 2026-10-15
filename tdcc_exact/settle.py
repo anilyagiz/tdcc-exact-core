@@ -27,7 +27,7 @@ def share(amount: int, bps: int) -> int:
 @dataclass
 class Settlement:
     job_id: str
-    outcome: str                 # "accepted" or "slashed"
+    outcome: str                 # "accepted", "slashed" or "dismissed"
     provider: str
     transfers: list              # [to, amount, why]
 
@@ -42,10 +42,22 @@ def accept(job_id: str, provider: str, price: int) -> Settlement:
 
 
 def slash(job_id: str, provider: str, renter: str, verifier: str, price: int,
-          stake: int) -> Settlement:
+          stake: int, bond: int = 0) -> Settlement:
+    """The provider is caught: the renter gets the escrow back, the verifier its share of the
+    stake and its challenge bond back (one transfer on-chain), TDCC the rest of the stake."""
     v = share(stake, VERIFIER_BPS)
-    return Settlement(job_id, "slashed", provider,
-                      [[renter, price, "escrow refunded"],
-                       [verifier, v, "share of the slashed stake"],
-                       ["tdcc", stake - v, "rest of the slashed stake"],
-                       [provider, -stake, "stake slashed"]])
+    t = [[renter, price, "escrow refunded"],
+         [verifier, v, "share of the slashed stake"],
+         ["tdcc", stake - v, "rest of the slashed stake"],
+         [provider, -stake, "stake slashed"]]
+    if bond:
+        t.append([verifier, bond, "challenge bond returned"])
+    return Settlement(job_id, "slashed", provider, t)
+
+
+def dismiss(job_id: str, provider: str, verifier: str, bond: int) -> Settlement:
+    """The challenge is rejected: the verifier's bond pays the provider for the delay (the job
+    then settles as accept() says)."""
+    return Settlement(job_id, "dismissed", provider,
+                      [[provider, bond, "challenge bond (dismissed challenge)"],
+                       [verifier, -bond, "challenge bond lost"]])

@@ -90,11 +90,13 @@ def test_known_values():
     job, renter, prov = b"\x01" * 32, b"\x02" * 32, b"\x03" * 32
     raw = (event_disc("Slashed") + job + prov + renter + (2_000_001).to_bytes(8, "little")
            + (25_000_000).to_bytes(8, "little") + (25_000_001).to_bytes(8, "little")
-           + (4).to_bytes(4, "little") + (1234).to_bytes(8, "little"))
+           + (4).to_bytes(4, "little") + (1234).to_bytes(8, "little")
+           + (1_000_000).to_bytes(8, "little"))
     e = decode_event(raw)
     assert e["name"] == "Slashed" and e["job"] == "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     assert (e["refunded"], e["to_verifier"], e["to_tdcc"], e["divergence_index"],
-            e["fault_step"]) == (2_000_001, 25_000_000, 25_000_001, 4, 1234)
+            e["fault_step"], e["bond"]) == (2_000_001, 25_000_000, 25_000_001, 4, 1234,
+                                           1_000_000)
 
 
 def test_b58_matches_solders():
@@ -158,7 +160,7 @@ JOB = [("config", "pubkey"), ("renter", "pubkey"), ("provider", "pubkey"),
        ("challenge_deadline", "u64"), ("commitment", "bytes32"),
        ("fingerprint", "bytes32"), ("trace_root", "bytes32"),
        ("checkpoints", "u32"), ("verifier", "pubkey"),
-       ("verifier_fingerprint", "bytes32"), ("bump", "u8")]
+       ("verifier_fingerprint", "bytes32"), ("bond", "u64"), ("bump", "u8")]
 
 
 def _job(state: int, price: int, opened: int, reveal: int, challenge: int, seed: int) -> bytes:
@@ -266,6 +268,7 @@ def test_validator_flow_is_indexed():
     m.register_provider(prov)
     m.stake(prov, 20_000_000)
     m.mint_to(renter.pubkey(), 10_000_000)
+    m.mint_to(verifier.pubkey(), Params().challenge_bond)
     model = b"\x07" * 32
 
     def post(job, fp):

@@ -239,6 +239,7 @@ class JobAccount:
     checkpoints: int
     verifier: Pubkey
     verifier_fingerprint: bytes
+    bond: int
 
     @staticmethod
     def decode(d: bytes) -> "JobAccount":
@@ -259,8 +260,9 @@ class JobAccount:
         commitment, fp, root = take(32), take(32), take(32)
         cps = struct.unpack("<I", take(4))[0]
         verifier, vfp = pk(), take(32)
+        bond = q()
         return JobAccount(config, renter, provider, job_id, digest, model, price, state,
-                          opened, cd, rd, chd, commitment, fp, root, cps, verifier, vfp)
+                          opened, cd, rd, chd, commitment, fp, root, cps, verifier, vfp, bond)
 
 
 @dataclass
@@ -293,6 +295,7 @@ class Params:
     challenge_window: int = 8
     min_stake: int = 10_000_000      # 10 USDC
     unstake_cooldown: int = 50
+    challenge_bond: int = 1_000_000  # 1 USDC, a verifier's deposit per challenge
 
 
 class Market:
@@ -371,7 +374,7 @@ class Market:
         self.treasury = ata(treasury_owner, self.mint)
         data = (u16(params.host_bps) + u16(params.verifier_bps) + u64(params.commit_window)
                 + u64(params.challenge_window) + u64(params.min_stake)
-                + u64(params.unstake_cooldown))
+                + u64(params.unstake_cooldown) + u64(params.challenge_bond))
         ixs = [self.token_account_ix(treasury_owner),
                self._ix("initialize",
                         [S(self.admin.pubkey(), True), W(self.config), R(self.mint),
@@ -406,6 +409,16 @@ class Market:
                                        [S(o), R(self.config), W(self.provider_pda(o)),
                                         R(self.mint), W(ata(o, self.mint)), W(self.vault),
                                         R(TOKEN_PROGRAM)])], owner)
+
+    def params(self) -> Params:
+        """The market's parameters, as its config account holds them."""
+        d = self.rpc.account(self.config)
+        if d is None:
+            raise ChainError(f"no config account {self.config}")
+        o = 8 + 4 * 32
+        hb, vb = struct.unpack("<HH", d[o:o + 4])
+        rest = struct.unpack("<5Q", d[o + 4:o + 44])
+        return Params(hb, vb, *rest)
 
     def provider(self, owner: Pubkey) -> ProviderAccount | None:
         d = self.rpc.account(self.provider_pda(owner))
@@ -442,9 +455,15 @@ class Market:
                                        [S(owner.pubkey()), R(self.config), W(job)], data)],
                              owner)
 
+    def challenge_ix(self, verifier: Pubkey, job: Pubkey, fingerprint: bytes) -> Instruction:
+        return self._ix("challenge",
+                        [S(verifier), R(self.config), W(job), R(self.mint),
+                         W(ata(verifier, self.mint)), W(self.vault), R(TOKEN_PROGRAM)],
+                        b32(fingerprint))
+
     def challenge(self, verifier: Keypair, job: Pubkey, fingerprint: bytes) -> str:
-        return self.rpc.send([self._ix("challenge", [S(verifier.pubkey()), W(job)],
-                                       b32(fingerprint))], verifier)
+        """Dispute a revealed receipt; the config's challenge bond leaves the verifier's USDC."""
+        return self.rpc.send([self.challenge_ix(verifier.pubkey(), job, fingerprint)], verifier)
 
     def settle(self, payer: Keypair | None, job: Pubkey) -> str:
         payer = payer or self.admin
@@ -468,9 +487,17 @@ class Market:
                                         R(TOKEN_PROGRAM)],
                                        u32(divergence_index) + u64(fault_step))], self.admin)
 
+    def dismiss_ix(self, caller: Pubkey, job: Pubkey, provider: Pubkey) -> Instruction:
+        return self._ix("dismiss",
+                        [S(caller, True), R(self.config), W(job), R(self.mint), W(self.vault),
+                         W(ata(provider, self.mint)), R(TOKEN_PROGRAM)])
+
     def dismiss(self, job: Pubkey) -> str:
-        return self.rpc.send([self._ix("dismiss", [S(self.admin.pubkey()), R(self.config),
-                                                   W(job)])], self.admin)
+        """The arbiter rejects the challenge; the bond goes to the provider."""
+        j = self.job(job)
+        return self.rpc.send([self.token_account_ix(j.provider),
+                              self.dismiss_ix(self.admin.pubkey(), job, j.provider)],
+                             self.admin)
 
     def expire(self, payer: Keypair, job: Pubkey) -> str:
         j = self.job(job)

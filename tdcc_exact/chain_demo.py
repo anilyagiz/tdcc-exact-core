@@ -2,8 +2,9 @@
 
     1. the renter opens two jobs (to provider A and provider B), its USDC into escrow
     2. A runs honestly, B skips a layer; both commit, then reveal their receipts
-    3. a verifier re-runs the job and challenges B's receipt
-    4. the bisection names B's first wrong instruction; the arbiter slashes B on-chain
+    3. a verifier re-runs the job and challenges B's receipt (putting up the challenge bond)
+    4. the bisection names B's first wrong instruction; the arbiter slashes B on-chain (the
+       verifier gets its bond back with its share of B's stake)
     5. A's job settles after its challenge window: 80% to A, 20% to TDCC
 
 The market (config, test USDC mint, treasury) is created on first use by the admin key in
@@ -51,7 +52,9 @@ def run(a) -> int:
         say(f"   created the market: test USDC mint {m.mint}\n   {link(sig)}")
     m.fund(*(k.pubkey() for k in (renter, pa, pb, verifier)))
     m.mint_to(renter.pubkey(), 2 * a.price)
-    m.mint_to(verifier.pubkey(), 0)
+    bond = m.params().challenge_bond
+    if m.balance(verifier.pubkey()) < 2 * bond:             # what each challenge puts up
+        m.mint_to(verifier.pubkey(), 2 * bond)
     for p in (pa, pb):
         acct = m.provider(p.pubkey())
         if acct is None:

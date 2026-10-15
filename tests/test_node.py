@@ -323,6 +323,7 @@ def test_nodes_on_a_validator(tmp_path, job):
         m.register_provider(p)
         m.stake(p, 50_000_000)
     m.mint_to(renter.pubkey(), 10_000_000)
+    m.mint_to(verifier.pubkey(), Params().challenge_bond)     # what its challenge puts up
 
     # the renter publishes the job and opens it with A, with B, and once with A naming a
     # model hash that is not the registry's (A must refuse that one)

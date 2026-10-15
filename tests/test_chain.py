@@ -18,10 +18,11 @@ from solders.keypair import Keypair  # noqa: E402
 
 from tdcc_exact.chain import ChainError, Market, Params, Rpc, ata  # noqa: E402
 from tdcc_exact.commit import commitment  # noqa: E402
-from tdcc_exact.settle import accept, slash  # noqa: E402
+from tdcc_exact.settle import accept, dismiss, slash  # noqa: E402
 
 URL = os.environ.get("TDCC_EXACT_RPC", "http://127.0.0.1:8899")
 PRICE, STAKE = 2_000_001, 50_000_001          # odd: the rounding is the program's
+BOND = 1_000_003
 MODEL = bytes([7]) * 32
 
 
@@ -49,13 +50,13 @@ def world():
         rpc.airdrop(k.pubkey(), 2_000_000_000)
     m = Market(rpc, admin, "localnet")
     m.initialize(treasury.pubkey(), Params(commit_window=4, challenge_window=4,
-                                           unstake_cooldown=4))
+                                           unstake_cooldown=4, challenge_bond=BOND))
     for p in (a, b, c):
         m.mint_to(p.pubkey(), STAKE)
         m.register_provider(p)
         m.stake(p, STAKE)
     m.mint_to(renter.pubkey(), 100 * PRICE)
-    m.mint_to(verifier.pubkey(), 0)
+    m.mint_to(verifier.pubkey(), 100 * BOND)
     return dict(m=m, rpc=rpc, admin=admin, renter=renter, verifier=verifier, a=a, b=b, c=c,
                 treasury=treasury, next=[1])
 
@@ -117,17 +118,22 @@ def test_caught_provider_is_slashed(world):
     w, m = world, world["m"]
     job = _open(w, w["b"])
     _post(w, w["b"], job, b"\x02" * 32)
+    v_pre = m.balance(w["verifier"].pubkey())
     m.challenge(w["verifier"], job, b"\x03" * 32)
     assert m.job(job).state == "Challenged"
+    assert m.job(job).bond == BOND
+    assert v_pre - m.balance(w["verifier"].pubkey()) == BOND        # the bond is posted
     impostor = copy.copy(m)
     impostor.admin = w["verifier"]
     with pytest.raises(ChainError, match="ConstraintHasOne"):                 # only the arbiter slashes
         impostor.slash(job, 1, 1234)
     r0, v0, t0 = (m.balance(w[k].pubkey()) for k in ("renter", "verifier", "treasury"))
     m.slash(job, 1, 1234)
-    want = {t[0]: t[1] for t in slash("j", "B", "renter", "verifier", PRICE, STAKE).transfers}
+    want = {}
+    for t in slash("j", "B", "renter", "verifier", PRICE, STAKE, BOND).transfers:
+        want[t[0]] = want.get(t[0], 0) + t[1]
     assert m.balance(w["renter"].pubkey()) - r0 == want["renter"]
-    assert m.balance(w["verifier"].pubkey()) - v0 == want["verifier"]
+    assert m.balance(w["verifier"].pubkey()) - v0 == want["verifier"]      # share + bond back
     assert m.balance(w["treasury"].pubkey()) - t0 == want["tdcc"]
     assert m.provider(w["b"].pubkey()).stake == 0
     assert m.job(job).state == "Slashed"
@@ -184,10 +190,15 @@ def test_dismissed_challenge_settles(world):
     w, m = world, world["m"]
     job = _open(w, w["a"])
     _post(w, w["a"], job, b"\x08" * 32)
+    v0, a0 = m.balance(w["verifier"].pubkey()), m.balance(w["a"].pubkey())
     m.challenge(w["verifier"], job, b"\x09" * 32)
     with pytest.raises(ChainError, match="WrongState"):
         m.settle(w["admin"], job)                   # challenged: no settle
     m.dismiss(job)
+    want = {t[0]: t[1] for t in dismiss("j", "A", "verifier", BOND).transfers}
+    assert m.balance(w["verifier"].pubkey()) - v0 == want["verifier"]      # the bond is lost
+    assert m.balance(w["a"].pubkey()) - a0 == want["A"]                    # ...to the provider
+    assert m.job(job).bond == 0
     w["rpc"].wait_slot(m.job(job).challenge_deadline)
     m.settle(w["admin"], job)
     assert m.job(job).state == "Settled"
@@ -217,13 +228,12 @@ def test_unstake_waits_for_the_cooldown_and_the_open_jobs(world):
 def test_a_dismissed_challenge_cannot_be_raised_again(world):
     """dismiss and a new challenge in one transaction (so in one slot, where the challenge
     window is still open): the challenge is refused, and the whole transaction with it."""
-    from tdcc_exact.chain import R, S, W, b32
     w, m = world, world["m"]
     job = _open(w, w["a"])
     _post(w, w["a"], job, b"\x0b" * 32)
     m.challenge(w["verifier"], job, b"\x0c" * 32)
-    again = [m._ix("dismiss", [S(w["admin"].pubkey()), R(m.config), W(job)]),
-             m._ix("challenge", [S(w["verifier"].pubkey()), W(job)], b32(b"\x0d" * 32))]
+    again = [m.dismiss_ix(w["admin"].pubkey(), job, w["a"].pubkey()),
+             m.challenge_ix(w["verifier"].pubkey(), job, b"\x0d" * 32)]
     with pytest.raises(ChainError, match="AlreadyChallenged"):
         w["rpc"].send(again, w["admin"], w["verifier"])
     assert m.job(job).state == "Challenged"            # the transaction rolled back whole
@@ -308,3 +318,22 @@ def test_settle_pays_only_the_market_treasury(world):
     with pytest.raises(ChainError, match="ConstraintHasOne"):
         thief.settle(w["admin"], job)
     m.settle(w["admin"], job)
+def test_a_challenge_needs_the_bond(world):
+    """A verifier with no USDC cannot challenge: challenging is not free."""
+    w, m = world, world["m"]
+    assert m.params().challenge_bond == BOND
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x0a" * 32)
+    broke = Keypair()
+    w["rpc"].airdrop(broke.pubkey(), 1_000_000_000)
+    m.mint_to(broke.pubkey(), BOND - 1)
+    with pytest.raises(ChainError, match="insufficient funds|0x1"):
+        m.challenge(broke, job, b"\x0b" * 32)
+    assert m.job(job).state == "Revealed"
+
+
+def test_initialize_needs_a_challenge_bond(world):
+    m = Market(world["rpc"], Keypair(), "localnet")
+    world["rpc"].airdrop(m.admin.pubkey(), 1_000_000_000)
+    with pytest.raises(ChainError, match="BadParams"):
+        m.initialize(Keypair().pubkey(), Params(challenge_bond=0))
