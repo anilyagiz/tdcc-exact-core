@@ -623,3 +623,88 @@ def test_a_fan_out_shares_one_commit_deadline(world):
         with pytest.raises(ChainError, match="BadParams"):
             m.open_job(w["renter"], w["a"].pubkey(), 99_000 + bad % 1000, bytes(32), MODEL,
                        PRICE, bad)
+
+
+# ------------------------------------------------------------------ payouts go to their party
+def _built(m, method, *args):
+    """The instructions (and signers) a Market method would send, without sending them."""
+    sent = []
+    fake = copy.copy(m)
+    fake.rpc = copy.copy(m.rpc)
+    fake.rpc.send = lambda ixs, *signers: sent.append((ixs, signers)) or "unsent"
+    getattr(Market, method)(fake, *args)
+    return sent[0]
+
+
+def _redirect(w, built, old, new, match):
+    """Send `built` with the token account `old` replaced by `new`: refused with `match`."""
+    from solders.instruction import AccountMeta, Instruction
+    ixs, signers = built
+    pid = w["m"].pid                                     # (not in a token-account set-up)
+    swapped = [ix if ix.program_id != pid else
+               Instruction(ix.program_id, ix.data,
+                           [AccountMeta(new if a.pubkey == old else a.pubkey, a.is_signer,
+                                        a.is_writable) for a in ix.accounts]) for ix in ixs]
+    with pytest.raises(ChainError, match=match):
+        w["rpc"].send(swapped, *signers)
+
+
+def _thief(w):
+    return ata(w["verifier"].pubkey(), w["m"].mint)       # a token account of someone else
+
+
+def test_settle_pays_the_provider_only_into_its_own_account(world):
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x22" * 32)
+    w["rpc"].wait_slot(m.job(job).challenge_deadline)
+    _redirect(w, _built(m, "settle", w["admin"], job), ata(w["a"].pubkey(), m.mint), _thief(w),
+              "ConstraintTokenOwner")
+    m.settle(w["admin"], job)
+
+
+def test_slash_pays_the_renter_and_the_verifier_only_into_their_own_accounts(world):
+    w, m = world, world["m"]
+    d, thief = _provider(w), ata(w["b"].pubkey(), world["m"].mint)
+    job = _open(w, d)
+    _post(w, d, job, b"\x23" * 32)
+    m.challenge(w["verifier"], job, b"\x24" * 32)
+    built = _built(m, "slash", job, 1, 5)
+    _redirect(w, built, ata(w["verifier"].pubkey(), m.mint), thief, "ConstraintTokenOwner")
+    _redirect(w, built, ata(w["renter"].pubkey(), m.mint), thief, "ConstraintTokenOwner")
+    m.slash(job, 1, 5)
+
+
+def test_dismiss_pays_the_bond_only_to_the_provider(world):
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x25" * 32)
+    m.challenge(w["verifier"], job, b"\x26" * 32)
+    _redirect(w, _built(m, "dismiss", job), ata(w["a"].pubkey(), m.mint), _thief(w),
+              "ConstraintTokenOwner")
+    m.dismiss(job)
+
+
+def test_expire_refunds_only_the_renter_in_the_market_mint(world):
+    w, m = world, world["m"]
+    other = copy.copy(m)
+    other.mint, _ = m.create_mint()                       # another token, same renter
+    other.mint_to(w["renter"].pubkey(), 0)
+    job = _open(w, w["a"])
+    w["rpc"].wait_slot(m.job(job).reveal_deadline)
+    built = _built(m, "expire", w["renter"], job)
+    renter_usdc = ata(w["renter"].pubkey(), m.mint)
+    _redirect(w, built, renter_usdc, _thief(w), "ConstraintTokenOwner")
+    _redirect(w, built, renter_usdc, ata(w["renter"].pubkey(), other.mint),
+              "ConstraintTokenMint")
+    m.expire(w["renter"], job)
+
+
+def test_unstake_pays_only_the_provider(world):
+    w, m = world, world["m"]
+    d = _provider(w)
+    m.request_unstake(d)
+    w["rpc"].wait_slot(m.provider(d.pubkey()).unlock_slot)
+    _redirect(w, _built(m, "unstake", d), ata(d.pubkey(), m.mint), _thief(w),
+              "ConstraintTokenOwner")
+    m.unstake(d)
