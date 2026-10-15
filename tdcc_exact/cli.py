@@ -23,7 +23,7 @@ import time
 from . import registry
 from .backend import SkipLayer
 from .commit import check_reveal, commitment, new_salt, provider_key
-from .dispute import bisect, first_fault, matches_root
+from .dispute import Fault, bisect, first_fault, matches_root, output_fault
 from .indexer import cmd_market
 from .node.cli import add_parser as add_node_parser
 from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
@@ -113,17 +113,26 @@ def cmd_verify(a) -> int:
 
 
 def dispute(job: Job, provider_cps: list[Checkpoint], model, every: int,
-            replay_cheat=None, out=print, binding=None):
+            replay_cheat=None, out=print, binding=None, receipt: Receipt | None = None):
     """Bisect the provider's checkpoints against the verifier's own run, then replay the
-    window on both sides (binding: the disputed on-chain job's). (verifier run, divergence,
-    fault)."""
+    window on both sides (binding: the disputed on-chain job's). If the traces agree and the
+    provider's receipt is given, check the receipt is the one its trace gives (an "output"
+    fault, with no divergence). (verifier run, divergence, fault)."""
     mine = run_job(job, "verifier", every=every, model=model, binding=binding)
     d = bisect(mine.log.checkpoints, provider_cps)
     if d is None:
-        out("traces agree: nothing to dispute")
-        return mine, None, None
+        f = None if receipt is None else output_fault(job, receipt, mine.receipt, provider_cps)
+        if f is None:
+            out("traces agree: nothing to dispute")
+        else:
+            out(f"traces agree, the receipt does not: {f.other}")
+        return mine, None, f
     out(f"bisection: checkpoint {d.index} of {len(mine.log.checkpoints)} differs "
         f"({d.rounds} rounds), steps {d.lo + 1}..{d.hi}")
+    if d.hi == d.lo:                    # no step between: the host's reads after the last run
+        f = Fault(d.lo, -1, -1, "the logits the host read back", "other logits", "output")
+        out(f"first fault: the output read back after step {d.lo} ({f.what})")
+        return mine, d, f
     w = (d.lo, d.hi)
     honest = run_job(job, "verifier", every=every, window=w, model=model,
                      binding=binding).log.records
@@ -141,15 +150,16 @@ def cmd_dispute(a) -> int:
     model = load_model(job.model)
     trace = load_trace(a.trace)
     cps = _checkpoints(trace)
-    if a.receipt:
-        rec = Receipt.load(a.receipt)
-        if not matches_root(cps, bytes.fromhex(rec.trace_root)):
-            print(f"{rec.provider}: the trace does not match the posted trace root "
-                  f"{rec.trace_root}: the provider loses the dispute")
-            return 1
-    _, d, _ = dispute(job, cps, model, trace.get("every", EVERY),
-                      _cheat(a.replay_skip_layer, model), binding=_binding(a, a.provider))
-    return 0 if d is None else 1
+    rec = Receipt.load(a.receipt) if a.receipt else None
+    if rec is not None and not matches_root(cps, bytes.fromhex(rec.trace_root)):
+        print(f"{rec.provider}: the trace does not match the posted trace root "
+              f"{rec.trace_root}: the provider loses the dispute")
+        return 1
+    provider = a.provider or (rec.provider if rec is not None else "A")
+    _, d, f = dispute(job, cps, model, trace.get("every", EVERY),
+                      _cheat(a.replay_skip_layer, model), binding=_binding(a, provider),
+                      receipt=rec)
+    return 0 if d is None and f is None else 1
 
 
 def cmd_prove(a) -> int:
@@ -269,10 +279,12 @@ def main(argv=None) -> int:
     d = sub.add_parser("dispute", help="find the first instruction a provider's trace got wrong")
     d.add_argument("--job", required=True)
     d.add_argument("--trace", required=True, help="the provider's trace")
-    d.add_argument("--receipt", help="the provider's receipt: its trace root must match")
     d.add_argument("--replay-skip-layer", type=int,
                    help="replay the provider's window with this shortcut (local demo)")
-    d.add_argument("--provider", default="A", help="whose job is disputed (its binding)")
+    d.add_argument("--receipt", help="the provider's receipt: its trace root must match, "
+                   "and its answer and logits the ones its trace gives")
+    d.add_argument("--provider", help="whose job is disputed (its binding; default: the "
+                   "receipt's provider, else A)")
     d.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "
                    "default: the provider name's key (--provider)")
     d.set_defaults(fn=cmd_dispute)

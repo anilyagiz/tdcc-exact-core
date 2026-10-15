@@ -262,14 +262,21 @@ def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
     eng = Engine(spec, W, cap=job.cap, backend=factory(log, cheat), wformat=job.wformat,
                  rows=job.chunk, pipeline=False)
     logits = eng.prefill([int(t) for t in job.prompt_ids], chunk=job.chunk)
+    log.finish(eng.backend.machine.slices)  # (after the logits were read back)
     logits = np.asarray(logits, np.float32).reshape(-1)
     answer = "YES" if logits[job.yes_id] > logits[job.no_id] else "NO"
     mh, lh, root = eng.backend.model_hash, h(logits.tobytes()), log.root
-    fp = h(job.digest, mh, answer.encode(), lh, root)
+    fp = h(job.digest, mh, answer.encode(), lh, root)    # (fingerprint(): the same formula)
     extra = {"skipped_mms": cheat.skipped} if cheat is not None else {}
     rec = Receipt(job.job_id, provider, answer, mh.hex(), lh.hex(), root.hex(), log.step,
                   len(log.checkpoints), fp.hex(), extra, bind.hex())
     return Run(rec, log, logits)
+
+
+def fingerprint(job: Job, rec: Receipt) -> str:
+    """The fingerprint a receipt's own fields give (what the program recomputes)."""
+    return h(job.digest, bytes.fromhex(rec.model_hash), rec.answer.encode(),
+             bytes.fromhex(rec.logits_hash), bytes.fromhex(rec.trace_root)).hex()
 
 
 def save_trace(log: TraceLog, path) -> None:

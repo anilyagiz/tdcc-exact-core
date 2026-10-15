@@ -461,3 +461,65 @@ def test_a_job_without_a_nonce_is_refused(setup, tmp_path):
     old = Job.load(tmp_path / "old.json")
     with pytest.raises(ValueError, match="nonce"):
         run_job(old, every=EVERY, model=model)
+
+
+# ------------------------------------------------------------------ the output is in the trace
+def test_the_trace_commits_to_the_logits_read_back(setup, monkeypatch):
+    """A machine that reads back other logits than it computed has another trace root."""
+    from opentpu.llm.qwen3 import IsaBackend
+    job, model, a = setup
+    real = IsaBackend.read
+
+    def lying(self, s, addr, nbytes):
+        out = real(self, s, addr, nbytes)
+        out[:4] ^= 0x40
+        return out
+    monkeypatch.setattr(IsaBackend, "read", lying)
+    b = run_job(job, "A", every=EVERY, model=model, binding=BIND)
+    assert b.log.step == a.log.step
+    assert b.receipt.trace_root != a.receipt.trace_root
+    d = bisect(a.log.checkpoints, b.log.checkpoints)
+    assert d is not None and d.index == len(a.log.checkpoints) - 1     # the last: the read
+    monkeypatch.undo()                                              # the verifier is honest
+    from tdcc_exact.cli import dispute
+    _, d, f = dispute(job, b.log.checkpoints, model, EVERY, out=lambda m: None, binding=BIND)
+    assert f is not None and f.what == "output" and f.step == a.log.step
+
+
+def _forge(job, rec, **kw):
+    import dataclasses
+    from tdcc_exact.oracle import fingerprint
+    f = dataclasses.replace(rec, **kw)
+    f.fingerprint = fingerprint(job, f)
+    return f
+
+
+def test_a_receipt_with_an_honest_trace_and_a_forged_answer_loses(setup, tmp_path, capsys):
+    """The honest trace root, a flipped answer and made-up logits hash (fingerprint and
+    commitment recomputed to match): the traces agree, but the receipt is not the one the
+    trace gives, so the dispute rules an output fault."""
+    from tdcc_exact.cli import main
+    from tdcc_exact.oracle import save_trace
+    job, model, a = setup
+    flip = "NO" if a.receipt.answer == "YES" else "YES"
+    forged = _forge(job, a.receipt, answer=flip, logits_hash="ab" * 32)
+    job.save(tmp_path / "job.json")
+    save_trace(a.log, tmp_path / "a.trace.json")
+    forged.save(tmp_path / "forged.json")
+    a.receipt.save(tmp_path / "honest.json")
+    args = ["dispute", "--job", str(tmp_path / "job.json"), "--trace",
+            str(tmp_path / "a.trace.json"), "--receipt"]
+    assert main(args + [str(tmp_path / "forged.json")]) == 1
+    out = capsys.readouterr().out
+    assert "the receipt does not" in out and "answer" in out and "logits_hash" in out
+    assert main(args + [str(tmp_path / "honest.json")]) == 0
+    assert "nothing to dispute" in capsys.readouterr().out
+
+
+def test_a_receipt_whose_root_is_not_its_trace_loses(setup):
+    from tdcc_exact.cli import dispute
+    job, model, a = setup
+    forged = _forge(job, a.receipt, trace_root="cd" * 32)
+    _, d, f = dispute(job, a.log.checkpoints, model, EVERY, out=lambda m: None,
+                      receipt=forged, binding=BIND)
+    assert d is None and f is not None and f.what == "output" and "trace root" in f.other

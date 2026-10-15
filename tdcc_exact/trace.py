@@ -21,7 +21,9 @@ again) therefore have different traces and fingerprints, and a fingerprint revea
 no use on another.
 
 The host's writes into DRAM between runs (the token, its embedding row) and the start of each
-run (its arguments) go into the chain too, so the log covers the inputs as well as the work.
+run (its arguments) go into the chain too, so the log covers the inputs as well as the work,
+and so do the host's reads back from DRAM (the logits), with a last checkpoint after them
+(TraceLog.finish): the trace root commits to the output a receipt's answer comes from.
 
 Two honest runs of the same job give the same leaves. Once a run goes wrong its chain differs
 from that step on (the chain is cumulative), so the first differing leaf can be found by a
@@ -178,16 +180,26 @@ class TraceLog:
         self.chain = h(self.chain, b"W", s.to_bytes(2, "little"), addr.to_bytes(8, "little"),
                        h(data))
 
+    def host_read(self, s: int, addr: int, data: bytes) -> None:
+        """What the host read back from DRAM (the logits): the output is in the chain."""
+        self.chain = h(self.chain, b"O", s.to_bytes(2, "little"), addr.to_bytes(8, "little"),
+                       len(data).to_bytes(8, "little"), h(data))
+
     def run_start(self, args) -> None:
         a = np.asarray([0] if args is None else [int(x) & 0xFFFFFFFF for x in args], np.uint32)
         self.chain = h(self.chain, b"R", a.tobytes())
 
     def checkpoint(self, slices) -> None:
-        if self.checkpoints and self.checkpoints[-1].step == self.step:
-            return
+        last = self.checkpoints[-1] if self.checkpoints else None
+        if last is not None and last.step == self.step and last.chain == self.chain:
+            return                              # (nothing happened since)
         st = h(*[state_hash(s) for s in slices])
         self.chain = h(self.chain, b"C", st)     # (so a difference in state stays in the chain)
         self.checkpoints.append(Checkpoint(self.step, self.chain, st))
+
+    def finish(self, slices) -> None:
+        """The last checkpoint, after the host read the output: the root covers the reads."""
+        self.checkpoint(slices)
 
     # ------------------------------------------------------------- the commitment
     @property

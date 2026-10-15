@@ -6,6 +6,9 @@
    referee plays, one round per transaction.
 2. Both sides reveal that window, one record per step (where it ran, the chain, a hash of the
    slice's state after it); the first record that differs is the instruction at fault.
+3. If the traces agree, the receipt must be the one the trace gives (output_fault): the trace
+   commits to the logits the host read, so a receipt with another answer or logits hash than
+   the verifier's re-run is at fault even though no instruction is.
 
 In a live market the provider replays its own window when challenged; here (the demo, the
 tests) both sides are replayed locally, the provider with the shortcut it took.
@@ -62,7 +65,8 @@ class Fault:
     pc: int
     honest: str                  # the instruction the honest run executed there
     other: str                   # and the other run
-    what: str                    # "state" (same instruction, different result) or "control"
+    what: str                    # "state" (same instruction, different result), "control",
+                                 # or "output" (the trace agrees, the receipt does not)
 
 
 def first_fault(honest, other) -> Fault | None:
@@ -80,3 +84,28 @@ def first_fault(honest, other) -> Fault | None:
         y = other[k]
         return Fault(y.step, y.slice, y.pc, "(ended)", y.instr, "control")
     return None
+
+
+def output_fault(job, posted, mine, provider_cps: list[Checkpoint]) -> Fault | None:
+    """When the traces agree: is the provider's receipt (`posted`) the one its own trace
+    gives? The trace root commits to the logits the host read back (TraceLog.host_read), so
+    with equal traces the provider's logits are the verifier's (`mine`, a re-run's receipt),
+    and its answer, logits hash and model hash must be the re-run's; its trace root must be
+    the root of the checkpoints it revealed, and its fingerprint the receipt's own formula.
+    A receipt that breaks any of these is the provider's fault ("output")."""
+    from .oracle import fingerprint
+    from .trace import merkle_root
+    why = []
+    if posted.trace_root != merkle_root([c.leaf for c in provider_cps]).hex():
+        why.append("its trace root is not the root of the checkpoints it revealed")
+    if posted.fingerprint != fingerprint(job, posted):
+        why.append("its fingerprint is not H(job, model, answer, logits, root) of its fields")
+    for k in ("model_hash", "logits_hash", "answer"):
+        if getattr(posted, k) != getattr(mine, k):
+            why.append(f"{k} {getattr(posted, k)} is not the {getattr(mine, k)} its trace "
+                       "gives")
+    if not why:
+        return None
+    last = provider_cps[-1].step if provider_cps else 0
+    return Fault(last, -1, -1, f"receipt from the trace: {mine.answer} {mine.logits_hash}",
+                 "; ".join(why), "output")

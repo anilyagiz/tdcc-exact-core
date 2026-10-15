@@ -22,7 +22,7 @@ def image_hash(images) -> bytes:
 
 
 class TracedBackend(IsaBackend):
-    """IsaBackend with every step, host write and run start in `log`."""
+    """IsaBackend with every step, host write, host read and run start in `log`."""
 
     def __init__(self, cfg, images, log: TraceLog):
         self.model_hash = image_hash(images)
@@ -35,6 +35,11 @@ class TracedBackend(IsaBackend):
         v = np.ascontiguousarray(data).view(np.uint8).reshape(-1)
         self.log.host_write(s, addr, v.tobytes())
         super().write(s, addr, data)
+
+    def read(self, s, addr, nbytes):
+        out = super().read(s, addr, nbytes)
+        self.log.host_read(s, addr, np.ascontiguousarray(out).view(np.uint8).tobytes())
+        return out
 
     def run(self, programs, args=None) -> dict:
         self.log.run_start(args)
