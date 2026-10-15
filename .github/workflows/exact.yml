@@ -17,6 +17,22 @@ jobs:
       - run: python -m pytest -q tests/test_exact.py tests/test_isa.py tests/test_compiler.py
       - name: the demo still runs end to end
         run: tdcc-exact demo
+      - name: the README's step-by-step commands
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -x
+          tdcc-exact job new --model tiny --question "Will it rain tomorrow?" --id j1 --out job.json
+          tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json
+          tdcc-exact run --job job.json --provider B --skip-layer 1 --out b.json --trace b.trace.json
+          tdcc-exact verify --job job.json --receipt a.json
+          ! tdcc-exact verify --job job.json --receipt b.json
+          tdcc-exact verify --job job.json --receipt b.json --json | python -c \
+            "import json, sys; assert json.load(sys.stdin)['verdict'] == 'CHALLENGE'"
+          tdcc-exact dispute --job job.json --trace b.trace.json --receipt b.json \
+            --replay-skip-layer 1 | grep 'first fault: step'
+          # a trace other than the posted one loses the dispute at once
+          tdcc-exact dispute --job job.json --trace a.trace.json --receipt b.json \
+            | grep 'does not match the posted trace root'
 
   program:
     runs-on: ubuntu-latest
