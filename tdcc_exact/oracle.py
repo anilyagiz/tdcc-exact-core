@@ -45,6 +45,24 @@ class Job:
         d["model"] = model_name(self.model)
         return h(json.dumps(d, sort_keys=True).encode())
 
+    def check(self, vocab: int | None = None) -> None:
+        """Raise ValueError for a job no run can answer right, before anyone spends a run on
+        it: one token for both answers (it would always say NO), a prompt longer than the KV
+        cache, token ids outside the model's vocabulary."""
+        if self.yes_id == self.no_id:
+            raise ValueError(f"the yes and no tokens are the same ({self.yes_id})")
+        if not self.prompt_ids:
+            raise ValueError("the prompt is empty")
+        if self.chunk < 1:
+            raise ValueError(f"chunk {self.chunk} is not a positive token count")
+        if len(self.prompt_ids) > self.cap:
+            raise ValueError(f"{len(self.prompt_ids)} prompt tokens do not fit a KV cache of "
+                             f"{self.cap}")
+        ids = list(self.prompt_ids) + [self.yes_id, self.no_id]
+        bad = [t for t in ids if t < 0 or (vocab is not None and t >= vocab)]
+        if bad:
+            raise ValueError(f"token ids outside the vocabulary ({vocab}): {bad[:5]}")
+
     def save(self, path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=1))
 
@@ -162,6 +180,7 @@ def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
     window: (lo, hi], record each step there for a dispute)."""
     from opentpu.llm.qwen3 import Engine    # (every Spec's engine: Qwen3, LFM2, ...)
     spec, W = model if model is not None else load_model(job.model)
+    job.check(getattr(spec, "vocab", None))
     log = TraceLog(every=every, window=window)
     eng = Engine(spec, W, cap=job.cap, backend=factory(log, cheat), wformat=job.wformat,
                  rows=job.chunk, pipeline=False)

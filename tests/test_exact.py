@@ -55,6 +55,16 @@ def test_a_skipped_layer_is_caught_at_the_skipped_instruction(setup):
     assert f is not None and f.what == "state" and f.honest.startswith(I.OPNAMES[I.MM])
 
 
+@pytest.mark.parametrize("change", [dict(no_id=3), dict(prompt_ids=[]), dict(chunk=0),
+                                    dict(cap=8), dict(yes_id=512), dict(prompt_ids=[-1])])
+def test_a_job_no_run_can_answer_is_refused_before_running(setup, change):
+    import dataclasses
+    job, model, _ = setup
+    bad = dataclasses.replace(job, **change)
+    with pytest.raises(ValueError):
+        run_job(bad, "A", every=EVERY, model=model)
+
+
 def test_bisect_agrees_on_equal_traces(setup):
     _, _, a = setup
     assert bisect(a.log.checkpoints, list(a.log.checkpoints)) is None
