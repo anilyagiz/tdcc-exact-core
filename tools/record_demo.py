@@ -1,27 +1,53 @@
 """Record the step-by-step tdcc-exact run for real, then render it as a terminal video.
 
-Usage: python tools/record_demo.py <workdir> <out.mp4>   (needs Pillow, ffmpeg, DejaVu fonts)
+Usage: python tools/record_demo.py <workdir> <out.mp4>
+
+Needs Pillow, ffmpeg, tdcc-exact on PATH (pip install -e .) and the DejaVu fonts (found in the
+usual system font folders, or in $TDCC_DEMO_FONTS).
 Each command is really executed; output lines are shown at the times they were printed.
 Typing of commands and the '#' narration lines are paced for a viewer.
 """
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
 import time
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+if len(sys.argv) != 3:
+    sys.exit(__doc__.split("\n\n")[1])
+for tool in ("ffmpeg", "tdcc-exact"):           # before spending a recording on it
+    if shutil.which(tool) is None:
+        sys.exit(f"record_demo: {tool} is not on PATH")
 WORK, OUT = sys.argv[1], sys.argv[2]
 os.makedirs(WORK, exist_ok=True)
 
+FONT_DIRS = [os.environ.get("TDCC_DEMO_FONTS", ""), "/usr/share/fonts/truetype/dejavu",
+             "/usr/share/fonts/dejavu", "/usr/share/fonts/TTF", "/usr/local/share/fonts",
+             str(Path.home() / "Library/Fonts"), "/Library/Fonts"]
+
+
+def font(name: str, size: int):
+    for d in filter(None, FONT_DIRS):
+        if (Path(d) / name).exists():
+            return ImageFont.truetype(str(Path(d) / name), size)
+    sys.exit(f"record_demo: {name} not found; install the DejaVu fonts or set TDCC_DEMO_FONTS")
+
+
+MONO = font("DejaVuSansMono.ttf", 25)               # (checked before the recording, too)
+MONO_B = font("DejaVuSansMono-Bold.ttf", 25)
+SANS_B = font("DejaVuSans-Bold.ttf", 24)
+
 STEPS = [
     ("renter opens a yes/no oracle job", 'tdcc-exact job new --model tiny --question "Will it rain tomorrow?" --id j1 --out job.json'),
-    ("provider A runs it honestly on the chip", "tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json"),
+    ("provider A runs it honestly (on the chip's simulator)", "tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json"),
     ("provider B cheats: skips layer 1 to save compute", "tdcc-exact run --job job.json --provider B --skip-layer 1 --out b.json --trace b.trace.json"),
     ("a verifier re-runs A on a laptop", "tdcc-exact verify --job job.json --receipt a.json"),
     ("...and B", "tdcc-exact verify --job job.json --receipt b.json"),
-    ("find the first instruction B got wrong", "tdcc-exact dispute --job job.json --trace b.trace.json --replay-skip-layer 1"),
+    ("find the first instruction B got wrong", "tdcc-exact dispute --job job.json --trace b.trace.json --receipt b.json --replay-skip-layer 1"),
 ]
 
 # ---------- record
@@ -59,9 +85,6 @@ END = t + 2.5
 W, H, FPS = 1920, 1080, 30
 BG, BAR, FG, DIM = (0x26, 0x21, 0x1D), (0x3A, 0x33, 0x2D), (0xF7, 0xF1, 0xEA), (0xA8, 0x9C, 0x90)
 GREEN, RED, AMBER, CYAN, PURPLE = (120, 205, 140), (240, 105, 95), (232, 184, 96), (110, 200, 255), (0xE2, 0xC0, 0x94)
-MONO = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 25)
-MONO_B = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 25)
-SANS_B = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
 LH, X0, Y0 = 34, 40, 90
 COLS = int((W - 2 * X0) / MONO.getlength("m"))
 ROWS = (H - Y0 - 30) // LH
@@ -119,5 +142,6 @@ for k in range(int(END * FPS)):
         d.rectangle([x, y + 4, x + 13, y + 28], fill=FG)
     ff.stdin.write(img.tobytes())
 ff.stdin.close()
-ff.wait()
+if ff.wait() != 0:
+    sys.exit(f"record_demo: ffmpeg failed (exit {ff.returncode}); {OUT} is not a video")
 print(f"video: {OUT}  {END:.1f}s")
