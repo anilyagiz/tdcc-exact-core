@@ -72,8 +72,10 @@ on the simulator); numbers in docs/exact.md sections 5 and 6.
       digest already; add a test that a provider who runs fp4 instead of int8 is caught.
 
 ### 5. Deliverables for the submission
-- [ ] Demo video (screen capture of `tdcc-exact demo --devnet` + Explorer).
-- [ ] The deck's "Code: [GitHub link]" and "Demo: [video link]".
+- [x] Demo video: the step-by-step run, recorded (docs/media/tdcc-exact-demo.mp4,
+      tools/record_demo.py).
+- [ ] A capture of `tdcc-exact demo --devnet` with its Explorer pages.
+- [x] The deck's "Code: [GitHub link]" ("Demo: [video link]" waits on the upload).
 - [ ] Repo visibility: it is private now; make it public for the judges.
 - [x] CI: GitHub Actions on Ubuntu (also builds the program and runs it on a local validator) running `python -m pytest -q tests/test_exact.py
       tests/test_isa.py tests/test_compiler.py` (the upstream suite needs Linux: `fcntl`).
@@ -90,7 +92,8 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
       TDCC bucket, put its hash on-chain with the receipt.
 - [ ] Reveal API on the provider node: `GET /jobs/{id}/window?lo=&hi=` returns the step
       records; a provider that does not answer within the deadline loses by default.
-- [ ] On-chain bisection game: each round a transaction (`bisect_step(index, leaf)`),
+- [ ] On-chain bisection game (the Merkle proofs it needs: `trace.merkle_proof` /
+      `merkle_verify`): each round a transaction (`bisect_step(index, leaf)`),
       both sides alternate, with timeouts. log2(checkpoints) rounds.
 - [ ] The last step: who decides which side is right about one instruction? Options:
       (a) a one-step proof on-chain: needs a Merkle tree over TMEM / ACT RAM instead of
@@ -117,15 +120,16 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
 - [ ] Verifier node: samples jobs, re-runs on a laptop, challenges, runs the bisection.
 - [ ] Renter API: "one API, like any GPU platform": HTTP endpoint that opens a job and
       returns the answer; payment per token in USDC from a wallet or over HTTP with x402.
-- [ ] More cheat scenarios in tests: a smaller model substituted, fp4 instead of int8,
+- [x] More cheat scenarios in tests: a smaller model substituted, fp4 instead of int8,
       tokens skipped, an answer with no run at all, a receipt copied (see 4).
 - [ ] Jobs beyond yes/no: generate N tokens (greedy only: sampling uses the host's RNG,
       which would have to be seeded from the job and committed).
 
 ### 9. Performance of the verifier
-- [ ] The trace log hashes every instruction in Python (`TraceLog.observe`). Measure on
+- [x] The trace log hashes every instruction in Python (`TraceLog.observe`). Measure on
       LFM2.5-230M; if it dominates, batch the chain per run or move the hashing into a C /
-      Rust extension.
+      Rust extension. (It does not: +14% on LFM2.5-230M, docs/exact.md section 7; about 5%
+      of a tiny-model run under the profiler, the rest is the simulator.)
 - [ ] Checkpoint interval (`EVERY = 4096`): trade-off between trace size and the window a
       dispute replays. Pick it from the measurements.
 
