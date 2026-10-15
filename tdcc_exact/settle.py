@@ -14,8 +14,13 @@ HOST_BPS = 8_000                 # of a settled job's price: the provider (host)
 VERIFIER_BPS = 5_000             # of a slashed stake: the verifier who caught it; TDCC the rest
 
 
+U64 = 2 ** 64
+
+
 def share(amount: int, bps: int) -> int:
     """amount * bps / 10000, rounded down (u64 * u16 fits in u128 on-chain)."""
+    if not (0 <= amount < U64 and 0 <= bps <= BPS):
+        raise ValueError(f"amount {amount} is not a u64 or bps {bps} is not in 0..{BPS}")
     return amount * bps // BPS
 
 

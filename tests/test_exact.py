@@ -114,6 +114,15 @@ def test_settlement_splits():
 
 
 # ------------------------------------------------------------------ settlement vectors
+def test_settlement_takes_only_what_the_program_can_hold():
+    for bad in (-1, 2 ** 64):
+        with pytest.raises(ValueError):
+            accept("j", "A", bad)
+        with pytest.raises(ValueError):
+            slash("j", "B", "r", "v", 1, bad)
+    assert accept("j", "A", 2 ** 64 - 1).transfers[0][1] > 0
+
+
 def test_settlement_matches_the_shared_vectors():
     """The Solana program's tests read the same file (programs/tdcc_exact)."""
     import json
