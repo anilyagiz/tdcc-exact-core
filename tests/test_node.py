@@ -190,6 +190,12 @@ def _provider(f, name="p", **kw):
                         f["models"], every=EVERY, log=lambda *a: None, **kw)
 
 
+def _verifier(f, rate=1.0):
+    from tdcc_exact.node.verifier import VerifierNode
+    return VerifierNode(f["chain"], f["verifier"], f["store"], f["dir"] / "v" / "state.json",
+                        f["models"], every=EVERY, rate=rate, log=lambda *a: None)
+
+
 J1 = Key("J1")
 
 
@@ -205,6 +211,9 @@ def test_provider_commits_reveals_publishes_once(fake, job):
     j = c.jobs_[J1]
     assert f["store"].get_trace(j.trace_root)["root"] == j.trace_root.hex()
     assert _provider(f).run_once(wait=True) == {}
+    # the verifier re-runs it and accepts, once
+    assert _verifier(f).run_once() == {"J1": "accepted"}
+    assert _verifier(f).run_once() == {}
 
 
 def test_provider_restart_after_an_unrecorded_commit_reveals(fake, job):
@@ -246,3 +255,21 @@ def test_provider_waits_for_an_unpublished_job_then_misses_it(fake, job):
     c.now += 100
     assert _provider(f).run_once() == {"J1": "missed"}
     assert c.sent == []
+
+
+def test_verifier_challenges_a_skipped_layer(fake, job):
+    f, c = fake, fake["chain"]
+    f["store"].put_job(job)
+    c.open(J1, f["provider"].pubkey(), job.digest, f["model_hash"])
+    assert _provider(f, skip_layer=1).run_once(wait=True) == {"J1": "published"}
+    v = _verifier(f)
+    assert v.run_once() == {"J1": "challenged"}
+    assert c.jobs_[J1].state == "Challenged"
+    assert v.state.get("J1")["trace"] == "available"
+
+
+def test_verifier_sampling(fake):
+    keys = [bytes([i]) * 32 for i in range(200)]
+    assert not any(_verifier(fake, rate=0.0).sampled(k) for k in keys)
+    assert all(_verifier(fake, rate=1.0).sampled(k) for k in keys)
+    assert 25 < sum(_verifier(fake, rate=0.25).sampled(k) for k in keys) < 80
