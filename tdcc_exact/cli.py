@@ -57,31 +57,42 @@ def cmd_run(a) -> int:
     return 0
 
 
-def cmd_verify(a) -> int:
-    job, rec = Job.load(a.job), Receipt.load(a.receipt)
+def verify(job: Job, rec: Receipt, every: int = EVERY, trace=None) -> dict:
+    """A verifier's verdict on a receipt: ACCEPT, CHALLENGE (with the fields that differ) or
+    REJECT (the reveal does not open the commitment, or the model build is not the job's)."""
+    v = {"provider": rec.provider, "job_id": rec.job_id, "posted": rec.fingerprint}
     if "commitment" in rec.extra and not check_reveal(
             bytes.fromhex(rec.extra["commitment"]), bytes.fromhex(rec.fingerprint),
             rec.provider, bytes.fromhex(rec.extra.get("salt", "00" * 32))):
-        print(f"{rec.provider}: REJECT  (the reveal does not open its commitment)")
-        return 1
+        return v | {"verdict": "REJECT", "why": "the reveal does not open its commitment"}
     why = registry.check(job, rec.model_hash)
     if why is not None and "not registered" not in why:
-        print(f"{rec.provider}: REJECT  ({why})")
-        return 1
-    if why is not None:
-        print(f"warning: {why}; the re-run decides alone")
-    r = run_job(job, "verifier", every=a.every)
-    if a.trace:
-        save_trace(r.log, a.trace)
+        return v | {"verdict": "REJECT", "why": why}
+    r = run_job(job, "verifier", every=every)
+    if trace:
+        save_trace(r.log, trace)
     mine = r.receipt
+    diff = {k: {"posted": getattr(rec, k), "re_run": getattr(mine, k)}
+            for k in ("answer", "model_hash", "logits_hash", "trace_root", "steps")
+            if getattr(mine, k) != getattr(rec, k)}
     ok = mine.fingerprint == rec.fingerprint
-    print(f"{rec.provider}: {'ACCEPT' if ok else 'CHALLENGE'}  "
-          f"(posted {rec.fingerprint}, re-run {mine.fingerprint})")
-    if not ok:
-        for k in ("answer", "model_hash", "logits_hash", "trace_root", "steps"):
-            if getattr(mine, k) != getattr(rec, k):
-                print(f"  {k}: posted {getattr(rec, k)}, re-run {getattr(mine, k)}")
-    return 0 if ok else 1
+    return v | {"verdict": "ACCEPT" if ok else "CHALLENGE", "re_run": mine.fingerprint,
+                "differs": diff, "warning": why}
+
+
+def cmd_verify(a) -> int:
+    v = verify(Job.load(a.job), Receipt.load(a.receipt), a.every, a.trace)
+    if a.json:
+        print(json.dumps(v, indent=1))
+    elif v["verdict"] == "REJECT":
+        print(f"{v['provider']}: REJECT  ({v['why']})")
+    else:
+        if v["warning"]:
+            print(f"warning: {v['warning']}; the re-run decides alone")
+        print(f"{v['provider']}: {v['verdict']}  (posted {v['posted']}, re-run {v['re_run']})")
+        for k, d in v["differs"].items():
+            print(f"  {k}: posted {d['posted']}, re-run {d['re_run']}")
+    return 0 if v["verdict"] == "ACCEPT" else 1
 
 
 def dispute(job: Job, provider_cps: list[Checkpoint], model, every: int,
@@ -200,6 +211,7 @@ def main(argv=None) -> int:
     v.add_argument("--receipt", required=True)
     v.add_argument("--trace", help="also write the verifier's trace here")
     v.add_argument("--every", type=int, default=EVERY)
+    v.add_argument("--json", action="store_true", help="print the verdict as JSON")
     v.set_defaults(fn=cmd_verify)
 
     g = sub.add_parser("registry", help="pin a model build's image hash (tdcc_exact/models.json)")

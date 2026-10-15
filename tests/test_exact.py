@@ -251,6 +251,21 @@ def test_a_receipt_with_no_run_behind_it_is_challenged(setup, tmp_path):
     assert main(verify + ["--receipt", str(tmp_path / "b.json")]) == 1
 
 
+def test_the_verdict_names_what_differs(setup):
+    import dataclasses
+    from tdcc_exact.cli import verify
+    from tdcc_exact.commit import commitment, new_salt
+    job, model, a = setup
+    assert verify(job, a.receipt, EVERY)["verdict"] == "ACCEPT"
+    b = run_job(job, "B", SkipLayer(1, layers_of(model[0])), every=EVERY, model=model)
+    v = verify(job, b.receipt, EVERY)
+    assert v["verdict"] == "CHALLENGE" and "trace_root" in v["differs"]
+    salt = new_salt()
+    lied = dataclasses.replace(a.receipt, extra={
+        "commitment": commitment(bytes(32), "A", salt).hex(), "salt": salt.hex()})
+    assert verify(job, lied, EVERY)["verdict"] == "REJECT"   # the reveal does not open it
+
+
 def test_the_verifier_needs_no_fcntl():
     """Verifiers run on any laptop, Windows included: nothing on tdcc-exact's path may import
     fcntl (only the card and RTL hosts in opentpu/ do)."""
