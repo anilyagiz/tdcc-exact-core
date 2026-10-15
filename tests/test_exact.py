@@ -813,3 +813,8 @@ def test_a_user_registry_layers_over_the_packaged_one(tmp_path, monkeypatch):
     monkeypatch.setenv(registry.ENV, str(user))
     with pytest.raises(ValueError, match="registry"):
         registry.load()
+
+
+def test_the_verifier_library_is_its_own_module():
+    from tdcc_exact import cli, verifier
+    assert cli.verify is verifier.verify and cli.dispute is verifier.dispute
