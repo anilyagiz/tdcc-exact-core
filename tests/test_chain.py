@@ -230,8 +230,9 @@ def test_unstake_waits_for_the_cooldown_and_the_open_jobs(world):
 
 
 def test_a_dismissed_challenge_cannot_be_raised_again(world):
-    """dismiss and a new challenge in one transaction (so in one slot, where the challenge
-    window is still open): the challenge is refused, and the whole transaction with it."""
+    """dismiss and a new challenge by the same verifier in one transaction (so in one slot,
+    where the challenge window is still open): the challenge is refused, and the whole
+    transaction with it."""
     w, m = world, world["m"]
     job = _open(w, w["a"])
     _post(w, w["a"], job, b"\x0b" * 32)
@@ -404,3 +405,57 @@ def test_the_arbiter_may_not_challenge(world):
     m.mint_to(w["arbiter"].pubkey(), BOND)
     with pytest.raises(ChainError, match="ArbiterChallenger"):
         m.challenge(w["arbiter"], job, b"\x17" * 32)
+
+
+def _verifier(w) -> Keypair:
+    v = Keypair()
+    w["rpc"].airdrop(v.pubkey(), 1_000_000_000)
+    w["m"].mint_to(v.pubkey(), 5 * BOND)
+    return v
+
+
+def _provider(w) -> Keypair:
+    """A provider of its own, for a test that slashes it."""
+    m, d = w["m"], Keypair()
+    w["rpc"].airdrop(d.pubkey(), 2_000_000_000)
+    m.mint_to(d.pubkey(), STAKE)
+    m.register_provider(d)
+    m.stake(d, STAKE)
+    return d
+
+
+def test_a_dismissed_self_challenge_does_not_lock_out_verifiers(world):
+    """A cheating provider challenges itself from a second key first; once that is dismissed
+    an honest verifier still challenges (until the original deadline) and the provider is
+    slashed. Challenge, dismiss and the second challenge go in one transaction, inside the
+    window."""
+    w, m = world, world["m"]
+    d, sock, v2 = _provider(w), _verifier(w), _verifier(w)
+    job = _open(w, d)
+    _post(w, d, job, b"\x18" * 32)
+    deadline = m.job(job).challenge_deadline
+    w["rpc"].send([m.challenge_ix(sock.pubkey(), job, b"\x19" * 32),
+                   m.dismiss_ix(w["arbiter"].pubkey(), job, d.pubkey()),
+                   m.challenge_ix(v2.pubkey(), job, b"\x1a" * 32)],
+                  w["admin"], sock, w["arbiter"], v2)
+    j = m.job(job)
+    assert (j.state, j.verifier, j.challenge_deadline) == ("Challenged", v2.pubkey(), deadline)
+    v0 = m.balance(v2.pubkey())
+    m.slash(job, 1, 99)
+    assert m.balance(v2.pubkey()) - v0 == STAKE // 2 + BOND
+    assert m.job(job).state == "Slashed"
+
+
+def test_a_dismissal_keeps_the_challenge_deadline(world):
+    w, m = world, world["m"]
+    v2 = _verifier(w)
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x1b" * 32)
+    deadline = m.job(job).challenge_deadline
+    m.challenge(w["verifier"], job, b"\x1c" * 32)
+    m.dismiss(job)
+    assert m.job(job).challenge_deadline == deadline
+    w["rpc"].wait_slot(deadline)
+    with pytest.raises(ChainError, match="WindowClosed"):       # after it: no new challenge
+        m.challenge(v2, job, b"\x1d" * 32)
+    m.settle(w["admin"], job)

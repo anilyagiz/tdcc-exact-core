@@ -13,7 +13,10 @@
 //!                                                  bond)        │           the verifier, the rest
 //!                                                               │           to TDCC)
 //!                                                               └──► dismiss ──► settle
-//!                                                                    (the bond to the provider)
+//!                                                                    (the bond to the provider;
+//!                                                                     another verifier may still
+//!                                                                     challenge until the
+//!                                                                     challenge deadline)
 //! ```
 //!
 //! The arbiter has `arbiter_window` slots from the challenge (the job's ruling_deadline) to slash
@@ -330,8 +333,14 @@ pub mod tdcc_exact {
         require!(j.state == JobState::Revealed, ExactError::WrongState);
         require!(now <= j.challenge_deadline, ExactError::WindowClosed);
         require!(fingerprint != j.fingerprint, ExactError::SameFingerprint);
-        // one challenge per job: once the arbiter dismissed one, the receipt stands
-        require!(j.verifier == Pubkey::default(), ExactError::AlreadyChallenged);
+        // A dismissed challenge does not end the window: otherwise a cheating provider would
+        // challenge itself first from a second key and, once dismissed, lock honest verifiers
+        // out. Any other verifier may still challenge until the original deadline (each puts up
+        // its own bond); the verifier whose challenge was just dismissed may not repeat it.
+        require!(
+            j.verifier != ctx.accounts.verifier.key(),
+            ExactError::AlreadyChallenged
+        );
         let a = &ctx.accounts;
         pay_in(
             &a.token_program,
@@ -486,8 +495,7 @@ pub mod tdcc_exact {
             bond,
         )?;
         let j = &mut ctx.accounts.job;
-        j.state = JobState::Revealed;
-        j.challenge_deadline = Clock::get()?.slot;
+        j.state = JobState::Revealed; // the original challenge_deadline stands
         j.bond = 0;
         emit!(Dismissed {
             job: j.key(),
@@ -989,7 +997,7 @@ pub enum ExactError {
     SameFingerprint,
     #[msg("this signer may not act on this job")]
     NotYourJob,
-    #[msg("the job was challenged already, and the challenge dismissed")]
+    #[msg("this verifier's challenge of the job was dismissed already")]
     AlreadyChallenged,
     #[msg("only the arbiter may rule before the ruling deadline")]
     ArbiterWindowOpen,
