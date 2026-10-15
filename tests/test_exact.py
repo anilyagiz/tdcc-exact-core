@@ -319,6 +319,41 @@ def test_the_cli_names_a_bad_file_instead_of_crashing(tmp_path, capsys):
         assert says in capsys.readouterr().err
 
 
+def test_the_rpc_client_does_not_retry_a_refusal():
+    pytest.importorskip("solders")
+    import http.server
+    import threading
+    import time
+    from tdcc_exact.chain import ChainError, Rpc
+
+    class Refuse(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_error(403)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Refuse)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(ChainError, match="HTTP 403"):
+            Rpc(f"http://127.0.0.1:{srv.server_port}").call("getSlot")
+        assert time.monotonic() - t0 < 1          # not 1 + 2 + 4 + 8 s of retries
+    finally:
+        srv.shutdown()
+
+
+def test_waiting_for_a_slot_gives_up():
+    pytest.importorskip("solders")
+    from tdcc_exact.chain import ChainError, Rpc
+
+    class Stalled(Rpc):
+        def slot(self):
+            return 10
+    with pytest.raises(ChainError, match="not reached"):
+        Stalled("http://unused").wait_slot(20, timeout=0.5)
+
+
 def test_the_verifier_needs_no_fcntl():
     """Verifiers run on any laptop, Windows included: nothing on tdcc-exact's path may import
     fcntl (only the card and RTL hosts in opentpu/ do)."""

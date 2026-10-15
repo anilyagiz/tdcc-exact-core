@@ -22,6 +22,7 @@ import json
 import os
 import struct
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,7 +81,14 @@ class Rpc:
                 with urllib.request.urlopen(req, timeout=30) as r:
                     out = json.loads(r.read())
                 break
-            except OSError:
+            except urllib.error.HTTPError as e:
+                if e.code < 500 and e.code != 429:     # a refusal: retrying will not change it
+                    raise ChainError(f"{method}: HTTP {e.code} {e.reason} from {self.url}") \
+                        from None
+                if attempt == 4:
+                    raise
+                time.sleep(2 ** attempt)
+            except OSError:                             # the network or the node, for now
                 if attempt == 4:
                     raise
                 time.sleep(2 ** attempt)
@@ -145,8 +153,14 @@ class Rpc:
         self.confirm(sig)
         return sig
 
-    def wait_slot(self, slot: int) -> None:
+    def wait_slot(self, slot: int, timeout: float = 600.0) -> None:
+        """Until the cluster is past `slot` (a deadline); ChainError if it is not within
+        `timeout` seconds (a stalled validator, or a slot far in the future)."""
+        end = time.monotonic() + timeout
         while self.slot() <= slot:
+            if time.monotonic() > end:
+                raise ChainError(f"slot {slot} not reached within {timeout:.0f} s "
+                                 f"(at {self.slot()})")
             time.sleep(0.4)
 
 
