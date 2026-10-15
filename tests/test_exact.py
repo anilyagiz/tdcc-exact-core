@@ -280,6 +280,22 @@ def test_prove_prints_a_path_to_the_posted_root(setup, tmp_path, capsys):
     assert main(["prove", "--trace", str(tmp_path / "a.trace.json"), "--index", "99"]) == 1
 
 
+def test_a_new_keypair_file_is_never_readable_by_others(tmp_path, monkeypatch):
+    pytest.importorskip("solders")
+    import os
+    import stat
+    from tdcc_exact import chain
+    monkeypatch.setenv("TDCC_EXACT_KEYS", str(tmp_path / "keys"))
+    old = os.umask(0o022)                    # a default umask: write_text would make it 0644
+    try:
+        k = chain.keypair("localnet", "renter")
+    finally:
+        os.umask(old)
+    p = tmp_path / "keys" / "localnet" / "renter.json"
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert chain.keypair("localnet", "renter").pubkey() == k.pubkey()   # read back the same
+
+
 def test_the_verifier_needs_no_fcntl():
     """Verifiers run on any laptop, Windows included: nothing on tdcc-exact's path may import
     fcntl (only the card and RTL hosts in opentpu/ do)."""

@@ -160,10 +160,12 @@ def keypair(cluster: str, name: str) -> Keypair:
     p = keys_dir(cluster) / f"{name}.json"
     if p.exists():
         return Keypair.from_bytes(bytes(json.loads(p.read_text())))
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     k = Keypair()
-    p.write_text(json.dumps(list(bytes(k))))
-    p.chmod(0o600)
+    # created 0600 from the start: write-then-chmod leaves the secret key readable in between
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(list(bytes(k))))
     return k
 
 
