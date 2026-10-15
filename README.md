@@ -456,9 +456,9 @@ the card went from 0.052 (build 84989047, before K smoothing) to 0.012.
 
 ## Contributing
 
-Issues and pull requests are welcome, and most of the work needs only Python and Verilator, not
-an FPGA. Changes to the ISA, the simulator or the RTL must keep `python3 -m pytest -q` passing,
-and performance claims should say how they were measured.
+Issues and pull requests are welcome; most of the work needs only Python, not an FPGA. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for where a change goes, the checks CI runs and the Solana
+program's tests, and [SECURITY.md](SECURITY.md) for reporting a vulnerability.
 
 ## License
 
