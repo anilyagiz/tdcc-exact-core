@@ -60,6 +60,27 @@ def world():
                 treasury=treasury, next=[1])
 
 
+def _events(w, sig) -> list[str]:
+    """The program's events in a transaction's logs, by name (Anchor: "Program data: " and
+    the first 8 bytes of SHA-256("event:<Name>"))."""
+    import base64
+    import hashlib
+    import time
+    names = ["Initialized", "ProviderRegistered", "Staked", "UnstakeRequested", "Unstaked",
+             "JobOpened", "ReceiptCommitted", "ReceiptRevealed", "Challenged", "Settled",
+             "Slashed", "Dismissed", "Expired"]
+    disc = {hashlib.sha256(f"event:{n}".encode()).digest()[:8]: n for n in names}
+    for _ in range(20):
+        tx = w["rpc"].call("getTransaction", sig, {"encoding": "json", "commitment": "confirmed",
+                                                   "maxSupportedTransactionVersion": 0})
+        if tx is not None:
+            break
+        time.sleep(0.5)
+    data = [base64.b64decode(l.split(": ", 1)[1]) for l in tx["meta"]["logMessages"]
+            if l.startswith("Program data: ")]
+    return [disc.get(d[:8], "?") for d in data]
+
+
 def _open(w, provider):
     jid = w["next"][0]
     w["next"][0] += 1
@@ -153,8 +174,9 @@ def test_unrevealed_job_expires_back_to_the_renter(world):
         m.expire(w["renter"], job)
     w["rpc"].wait_slot(m.job(job).reveal_deadline)
     r0 = m.balance(w["renter"].pubkey())
-    m.expire(w["renter"], job)
+    sig = m.expire(w["renter"], job)
     assert m.balance(w["renter"].pubkey()) - r0 == PRICE
+    assert _events(w, sig) == ["Expired"]
     assert m.job(job).state == "Expired"
 
 
@@ -176,7 +198,7 @@ def test_unstake_waits_for_the_cooldown_and_the_open_jobs(world):
     job = _open(w, c)
     with pytest.raises(ChainError, match="StakeLocked"):                # no unstake requested
         m.unstake(c)
-    m.request_unstake(c)
+    assert _events(w, m.request_unstake(c)) == ["UnstakeRequested"]
     with pytest.raises(ChainError, match="ProviderNotStaked"):          # leaving: no new jobs
         _open(w, c)
     with pytest.raises(ChainError, match="StakeLocked"):                # the cooldown runs
@@ -187,7 +209,7 @@ def test_unstake_waits_for_the_cooldown_and_the_open_jobs(world):
     w["rpc"].wait_slot(m.job(job).reveal_deadline)
     m.expire(w["renter"], job)
     before = m.balance(c.pubkey())
-    m.unstake(c)
+    assert _events(w, m.unstake(c)) == ["Unstaked"]
     assert m.balance(c.pubkey()) - before == STAKE
     assert m.provider(c.pubkey()).stake == 0
 
@@ -237,3 +259,12 @@ def test_a_market_needs_windows_and_a_stake(world, bad):
     m = Market(rpc, admin, "localnet")
     with pytest.raises(ChainError, match="BadParams"):
         m.initialize(Keypair().pubkey(), dataclasses.replace(Params(), **bad))
+
+
+def test_a_new_market_and_provider_are_announced(world):
+    rpc, admin, p = world["rpc"], Keypair(), Keypair()
+    for k in (admin, p):
+        rpc.airdrop(k.pubkey(), 2_000_000_000)
+    m = Market(rpc, admin, "localnet")
+    assert "Initialized" in _events(world, m.initialize(Keypair().pubkey(), Params()))
+    assert _events(world, m.register_provider(p)) == ["ProviderRegistered"]

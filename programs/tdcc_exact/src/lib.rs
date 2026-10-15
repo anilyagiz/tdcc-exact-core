@@ -93,6 +93,11 @@ pub mod tdcc_exact {
         c.unstake_cooldown = params.unstake_cooldown;
         c.bump = ctx.bumps.config;
         c.vault_bump = ctx.bumps.vault;
+        emit!(Initialized {
+            config: c.key(),
+            admin: c.admin,
+            mint: c.mint
+        });
         Ok(())
     }
 
@@ -103,6 +108,7 @@ pub mod tdcc_exact {
         p.open_jobs = 0;
         p.unlock_slot = 0;
         p.bump = ctx.bumps.provider;
+        emit!(ProviderRegistered { provider: p.owner });
         Ok(())
     }
 
@@ -135,6 +141,10 @@ pub mod tdcc_exact {
             .slot
             .checked_add(cooldown)
             .ok_or(ExactError::Overflow)?;
+        emit!(UnstakeRequested {
+            provider: p.owner,
+            unlock_slot: p.unlock_slot
+        });
         Ok(())
     }
 
@@ -159,6 +169,10 @@ pub mod tdcc_exact {
         let p = &mut ctx.accounts.provider;
         p.stake = 0;
         p.unlock_slot = 0;
+        emit!(Unstaked {
+            provider: p.owner,
+            amount
+        });
         Ok(())
     }
 
@@ -423,9 +437,16 @@ pub mod tdcc_exact {
             &a.config,
             price,
         )?;
+        let job_key = ctx.accounts.job.key();
+        let renter = ctx.accounts.job.renter;
         ctx.accounts.job.state = JobState::Expired;
         let p = &mut ctx.accounts.provider;
         p.open_jobs = p.open_jobs.saturating_sub(1);
+        emit!(Expired {
+            job: job_key,
+            renter,
+            refunded: price
+        });
         Ok(())
     }
 }
@@ -727,6 +748,37 @@ pub struct Expire<'info> {
 }
 
 // ------------------------------------------------------------------------- events, errors
+#[event]
+pub struct Initialized {
+    pub config: Pubkey,
+    pub admin: Pubkey,
+    pub mint: Pubkey,
+}
+
+#[event]
+pub struct ProviderRegistered {
+    pub provider: Pubkey,
+}
+
+#[event]
+pub struct UnstakeRequested {
+    pub provider: Pubkey,
+    pub unlock_slot: u64,
+}
+
+#[event]
+pub struct Unstaked {
+    pub provider: Pubkey,
+    pub amount: u64,
+}
+
+#[event]
+pub struct Expired {
+    pub job: Pubkey,
+    pub renter: Pubkey,
+    pub refunded: u64,
+}
+
 #[event]
 pub struct Staked {
     pub provider: Pubkey,
