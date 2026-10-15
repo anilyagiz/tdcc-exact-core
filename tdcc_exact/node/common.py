@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 
 from ..oracle import Job, Receipt, is_tiny, layers_of, load_model, run_job
-from ..trace import EVERY
 
 
 class Models:
@@ -31,19 +30,19 @@ class Models:
         return self._cache[p]
 
 
-def run(job: Job, who: str, models: Models, every: int = EVERY, skip_layer: int | None = None,
-        job_key=None):
-    """The one place a node runs a job (oracle.run_job). job_key: the on-chain job account
-    (its 32 bytes), for when the trace is bound to it."""
+def run(job: Job, who: str, models: Models, skip_layer: int | None = None, job_key=None):
+    """The one place a node runs a job (oracle.run_job), at the job's own checkpoint interval.
+    job_key: the on-chain job account (its 32 bytes): the run's trace is bound to it, so a
+    fingerprint revealed on another job cannot be replayed on this one."""
     from ..backend import SkipLayer
     model = models.get(job.model)
     cheat = None if skip_layer is None else SkipLayer(skip_layer, layers_of(model[0]))
     local = Job(**{**job.__dict__, "model": models.path(job.model)})
-    # (job_key is unused until run_job takes the binding: then binding=bytes(job_key) here)
-    return run_job(local, who, cheat, every=every, model=model)
+    return run_job(local, who, cheat, model=model,
+                   binding=None if job_key is None else bytes(job_key))
 
 
-def verdict(job: Job, j, models: Models, every: int = EVERY) -> dict:
+def verdict(job: Job, j, models: Models, job_key) -> dict:
     """cli.verify on the receipt a Job account holds (fingerprint, model hash, trace root:
     the chain keeps no answer, logits hash or step count, so only those fields compare).
     {"verdict": ACCEPT | CHALLENGE | REJECT, "re_run": fingerprint, ...}; a REJECT (the
@@ -53,11 +52,11 @@ def verdict(job: Job, j, models: Models, every: int = EVERY) -> dict:
     rec = Receipt(job.job_id, str(j.provider), "", j.model_hash.hex(), "", j.trace_root.hex(),
                   0, j.checkpoints, j.fingerprint.hex())
     local = Job(**{**job.__dict__, "model": models.path(job.model)})
-    v = verify(local, rec, every)
+    v = verify(local, rec, binding=bytes(job_key))
     v["differs"] = {k: d for k, d in v.get("differs", {}).items()
                     if k in ("model_hash", "trace_root")}
     if v["verdict"] == "REJECT":
-        v["re_run"] = run(job, "verifier", models, every).receipt.fingerprint
+        v["re_run"] = run(job, "verifier", models, job_key=job_key).receipt.fingerprint
     return v
 
 

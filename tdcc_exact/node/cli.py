@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ..trace import EVERY
 
 
 def cmd_node(a) -> int:
@@ -45,13 +44,13 @@ def cmd_node(a) -> int:
     print(f"{a.role} {owner.pubkey()} on market {chain.m.config} ({a.rpc}), state {state}")
     if a.role == "provider":
         from .provider import ProviderNode
-        node = ProviderNode(chain, owner, store, state, models, a.every)
+        node = ProviderNode(chain, owner, store, state, models)
         if a.once:
             print(node.run_once(wait=True))
             return 0
     else:
         from .verifier import VerifierNode
-        node = VerifierNode(chain, owner, store, state, models, a.every, a.rate)
+        node = VerifierNode(chain, owner, store, state, models, rate=a.rate)
         if a.once:
             print(node.run_once())
             return 0
@@ -75,7 +74,6 @@ def add_parser(sub) -> argparse.ArgumentParser:
     n.add_argument("--store", default="http://127.0.0.1:8787", help="store URL or directory")
     n.add_argument("--state", help="state file (default: KEYS/<name>.state/state.json)")
     n.add_argument("--models", help="directory holding the models jobs name")
-    n.add_argument("--every", type=int, default=EVERY)
     n.add_argument("--rate", type=float, default=1.0, help="verifier: share of jobs re-run")
     n.add_argument("--once", action="store_true", help="one pass, then exit")
     n.add_argument("--poll", type=float, default=2.0, help="seconds between passes")

@@ -12,18 +12,17 @@ from __future__ import annotations
 import hashlib
 import time
 
-from ..trace import EVERY
 from .common import Models, StateFile, verdict
 from .store import NotFound, StoreError, Tampered
 
 
 class VerifierNode:
     def __init__(self, chain, owner, store, state_path, models: Models | None = None,
-                 every: int = EVERY, rate: float = 1.0, log=print):
+                 rate: float = 1.0, log=print):
         self.chain, self.owner, self.store = chain, owner, store
         self.state = StateFile(state_path)
         self.models = models or Models()
-        self.every, self.rate, self.log = every, rate, log
+        self.rate, self.log = rate, log
 
     def sampled(self, key) -> bool:
         x = hashlib.sha256(b"tdcc-exact/sample/v1" + bytes(key)
@@ -75,7 +74,7 @@ class VerifierNode:
                                                        f"on-chain one: {e}")
         except NotFound:
             raise StoreError(f"job {j.job_digest.hex()[:16]}.. is not in the store") from None
-        v = verdict(job, j, self.models, self.every)
+        v = verdict(job, j, self.models, bytes(key))
         try:
             self.store.get_trace(j.trace_root.hex())
             trace = "available"

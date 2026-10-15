@@ -28,7 +28,6 @@ from pathlib import Path
 from .. import registry
 from ..commit import commitment, new_salt
 from ..oracle import model_name
-from ..trace import EVERY
 from .common import Models, StateFile, run
 from .store import NotFound, StoreError, Tampered
 
@@ -37,14 +36,14 @@ DONE = {"refused", "missed", "published", "lost"}
 
 class ProviderNode:
     def __init__(self, chain, owner, store, state_path, models: Models | None = None,
-                 every: int = EVERY, registry_path=registry.PATH, skip_layer: int | None = None,
+                 registry_path=registry.PATH, skip_layer: int | None = None,
                  log=print):
         """skip_layer: tests only, a dishonest provider that skips that layer's work."""
         self.chain, self.owner, self.store = chain, owner, store
         self.state = StateFile(state_path)
         self.traces = Path(state_path).parent / "traces"
         self.models = models or Models()
-        self.every, self.registry_path, self.skip_layer = every, registry_path, skip_layer
+        self.registry_path, self.skip_layer = registry_path, skip_layer
         self.log = log
 
     # ------------------------------------------------------------------ one pass
@@ -159,7 +158,7 @@ class ProviderNode:
             job.check(getattr(self.models.get(job.model)[0], "vocab", None))
         except ValueError as e:
             return self._refuse(k, f"no run can answer this job: {e}")
-        res = run(job, str(self.owner.pubkey()), self.models, self.every, self.skip_layer,
+        res = run(job, str(self.owner.pubkey()), self.models, self.skip_layer,
                   job_key=bytes(key))
         r = res.receipt
         if r.model_hash != j.model_hash.hex():

@@ -18,12 +18,12 @@ EVERY = 512
 
 @pytest.fixture(scope="module")
 def job():
-    return new_job("tiny", "Will it rain tomorrow?", "n1")
+    return new_job("tiny", "Will it rain tomorrow?", "n1", every=EVERY)
 
 
 @pytest.fixture(scope="module")
 def trace(job):
-    return run_job(job, "A", every=EVERY, model=tiny_model()).log.to_json()
+    return run_job(job, "A", model=tiny_model()).log.to_json()
 
 
 @pytest.fixture(params=["dir", "http"])
@@ -58,7 +58,7 @@ def test_trace_round_trip(store, trace):
 
 def test_job_under_another_key_is_rejected(tmp_path, job):
     d = DirStore(tmp_path)
-    other = new_job("tiny", "Will it snow tomorrow?")
+    other = new_job("tiny", "Will it snow tomorrow?", every=EVERY)
     with pytest.raises(Tampered):
         d.put_raw("jobs", job.digest.hex(), job_json(other))
     # a blob changed on disk (or by a server) after it was stored: the fetcher rejects it
@@ -78,7 +78,7 @@ def test_the_server_refuses_a_tampered_put(tmp_path, job):
         c = HttpStore(url)
         with pytest.raises(Tampered):
             c._req("PUT", f"/job/{job.digest.hex()}",
-                   job_json(new_job("tiny", "Will it snow tomorrow?")))
+                   job_json(new_job("tiny", "Will it snow tomorrow?", every=EVERY)))
         with pytest.raises(NotFound):
             c.get_job(job.digest)
     finally:
@@ -89,7 +89,7 @@ def test_the_client_rejects_a_lying_server(tmp_path, job):
     d = DirStore(tmp_path)
     k = d.put_job(job)
     # the server's disk was edited: it serves another job under k; the client catches it
-    (tmp_path / "jobs" / f"{k}.json").write_bytes(job_json(new_job("tiny", "Other?")))
+    (tmp_path / "jobs" / f"{k}.json").write_bytes(job_json(new_job("tiny", "Other?", every=EVERY)))
     srv, url = start(d)
     try:
         with pytest.raises(Tampered):
@@ -198,13 +198,13 @@ def fake(tmp_path):
 def _provider(f, name="p", **kw):
     from tdcc_exact.node.provider import ProviderNode
     return ProviderNode(f["chain"], f["provider"], f["store"], f["dir"] / name / "state.json",
-                        f["models"], every=EVERY, log=lambda *a: None, **kw)
+                        f["models"], log=lambda *a: None, **kw)
 
 
 def _verifier(f, rate=1.0):
     from tdcc_exact.node.verifier import VerifierNode
     return VerifierNode(f["chain"], f["verifier"], f["store"], f["dir"] / "v" / "state.json",
-                        f["models"], every=EVERY, rate=rate, log=lambda *a: None)
+                        f["models"], rate=rate, log=lambda *a: None)
 
 
 J1 = Key("J1")
@@ -240,7 +240,7 @@ def test_provider_restart_after_an_unrecorded_commit_reveals(fake, job):
 
 def test_provider_refuses_a_job_that_is_not_the_on_chain_one(fake, job, tmp_path):
     f, c = fake, fake["chain"]
-    other = new_job("tiny", "Will it snow tomorrow?")
+    other = new_job("tiny", "Will it snow tomorrow?", every=EVERY)
     f["store"].put_job(job)
     c.open(J1, f["provider"].pubkey(), other.digest, f["model_hash"])
     # the renter's file under the on-chain digest is another job: the store's check refuses it
@@ -341,11 +341,11 @@ def test_nodes_on_a_validator(tmp_path, job):
     keys.mkdir()
     for name, k in (("provider", a), ("admin", admin)):
         (keys / f"{name}.json").write_text(json.dumps(list(bytes(k))))
-    pb = ProviderNode(chain, b, store, tmp_path / "b" / "state.json", models, EVERY,
+    pb = ProviderNode(chain, b, store, tmp_path / "b" / "state.json", models,
                       skip_layer=1, log=quiet)
     assert pb.run_once() == {str(jb): "committed"}       # (A's --once waits out the window)
     assert main(["node", "provider", "--rpc", URL, "--keys", str(keys), "--store", url,
-                 "--every", str(EVERY), "--once"]) == 0
+                 "--once"]) == 0
     assert pb.run_once(wait=True) == {str(jb): "published"}
     sa = json.loads((keys / "provider.state" / "state.json").read_text())
     assert sa[str(ja)]["status"] == "published" and sa[str(jx)]["status"] == "refused"
@@ -354,11 +354,11 @@ def test_nodes_on_a_validator(tmp_path, job):
     assert store.get_trace(m.job(ja).trace_root)["root"] == m.job(ja).trace_root.hex()
 
     # a restarted A does nothing more
-    pa = ProviderNode(chain, a, store, keys / "provider.state" / "state.json", models, EVERY,
+    pa = ProviderNode(chain, a, store, keys / "provider.state" / "state.json", models,
                       log=quiet)
     assert pa.run_once(wait=True) == {}
 
-    v = VerifierNode(chain, verifier, store, tmp_path / "v" / "state.json", models, EVERY,
+    v = VerifierNode(chain, verifier, store, tmp_path / "v" / "state.json", models,
                      log=quiet)
     assert v.run_once() == {str(ja): "accepted", str(jb): "challenged"}
     assert m.job(jb).state == "Challenged" and m.job(jb).verifier == verifier.pubkey()
