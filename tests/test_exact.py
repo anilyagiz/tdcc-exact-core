@@ -87,6 +87,8 @@ def test_bisect_lands_where_the_one_before_agrees(other, index):
     mine = _cps(5)
     d = bisect(mine, other)
     assert d is not None and d.index == index
+    assert d.lo == (mine[index - 1].step if index else 0)       # replay from the agreeing one
+    assert d.hi > d.lo
     assert index == 0 or mine[index - 1].leaf == other[index - 1].leaf
     assert index >= min(len(mine), len(other)) or mine[index].leaf != other[index].leaf
 
@@ -352,6 +354,20 @@ def test_waiting_for_a_slot_gives_up():
             return 10
     with pytest.raises(ChainError, match="not reached"):
         Stalled("http://unused").wait_slot(20, timeout=0.5)
+
+
+def test_the_cli_opens_and_runs_a_job(tmp_path, capsys):
+    import json
+    from tdcc_exact.cli import main
+    job, rec = tmp_path / "job.json", tmp_path / "a.json"
+    assert main(["job", "new", "--question", "Will it rain tomorrow?", "--id", "j1",
+                 "--out", str(job)]) == 0
+    assert main(["run", "--job", str(job), "--provider", "A", "--out", str(rec),
+                 "--trace", str(tmp_path / "a.trace.json"), "--every", str(EVERY)]) == 0
+    r = json.loads(rec.read_text())
+    assert r["answer"] in ("YES", "NO") and len(r["fingerprint"]) == 64
+    assert {"commitment", "salt"} <= set(r["extra"])           # ready for commit-reveal
+    assert "commit " in capsys.readouterr().out
 
 
 def test_the_verifier_needs_no_fcntl():
