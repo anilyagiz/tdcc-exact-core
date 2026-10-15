@@ -16,6 +16,9 @@
 //!                                                                    (the bond to the provider)
 //! ```
 //!
+//! The arbiter has `arbiter_window` slots from the challenge (the job's ruling_deadline) to slash
+//! or dismiss; after that anyone may dismiss and the receipt stands.
+//!
 //! A provider that commits but never reveals (or never commits) lets the renter take the
 //! escrow back after the reveal deadline (`expire`).
 //!
@@ -82,6 +85,7 @@ pub mod tdcc_exact {
             ExactError::BadParams
         );
         require!(params.challenge_bond > 0, ExactError::BadParams);
+        require!(params.arbiter_window > 0, ExactError::BadParams);
         let c = &mut ctx.accounts.config;
         c.admin = ctx.accounts.admin.key();
         c.mint = ctx.accounts.mint.key();
@@ -94,6 +98,7 @@ pub mod tdcc_exact {
         c.min_stake = params.min_stake;
         c.unstake_cooldown = params.unstake_cooldown;
         c.challenge_bond = params.challenge_bond;
+        c.arbiter_window = params.arbiter_window;
         c.bump = ctx.bumps.config;
         c.vault_bump = ctx.bumps.vault;
         emit!(Initialized {
@@ -229,6 +234,8 @@ pub mod tdcc_exact {
         j.verifier = Pubkey::default();
         j.verifier_fingerprint = [0; 32];
         j.bond = 0;
+        j.challenge_slot = 0;
+        j.ruling_deadline = 0;
         j.bump = ctx.bumps.job;
         let p = &mut ctx.accounts.provider;
         p.open_jobs = p.open_jobs.checked_add(1).ok_or(ExactError::Overflow)?;
@@ -299,12 +306,11 @@ pub mod tdcc_exact {
     /// the delay) if the challenge is dismissed, so challenging costs something when wrong.
     pub fn challenge(ctx: Context<Challenge>, fingerprint: [u8; 32]) -> Result<()> {
         let bond = ctx.accounts.config.challenge_bond;
+        let arbiter_window = ctx.accounts.config.arbiter_window;
+        let now = Clock::get()?.slot;
         let j = &ctx.accounts.job;
         require!(j.state == JobState::Revealed, ExactError::WrongState);
-        require!(
-            Clock::get()?.slot <= j.challenge_deadline,
-            ExactError::WindowClosed
-        );
+        require!(now <= j.challenge_deadline, ExactError::WindowClosed);
         require!(fingerprint != j.fingerprint, ExactError::SameFingerprint);
         // one challenge per job: once the arbiter dismissed one, the receipt stands
         require!(j.verifier == Pubkey::default(), ExactError::AlreadyChallenged);
@@ -321,12 +327,17 @@ pub mod tdcc_exact {
         j.verifier = ctx.accounts.verifier.key();
         j.verifier_fingerprint = fingerprint;
         j.bond = bond;
+        j.challenge_slot = now;
+        j.ruling_deadline = now
+            .checked_add(arbiter_window)
+            .ok_or(ExactError::Overflow)?;
         j.state = JobState::Challenged;
         emit!(Challenged {
             job: j.key(),
             verifier: j.verifier,
             fingerprint,
-            bond
+            bond,
+            ruling_deadline: j.ruling_deadline
         });
         Ok(())
     }
@@ -376,6 +387,11 @@ pub mod tdcc_exact {
         require!(j.state == JobState::Challenged, ExactError::WrongState);
         // the ruling points into the posted trace (== count: the provider's list stopped early)
         require!(divergence_index <= j.checkpoints, ExactError::BadParams);
+        // Past the ruling deadline the receipt stands (anyone may dismiss): no late slash.
+        require!(
+            Clock::get()?.slot <= j.ruling_deadline,
+            ExactError::WindowClosed
+        );
         let stake = ctx.accounts.provider.stake;
         let (to_verifier, to_tdcc) = math::slash(stake, c.verifier_bps);
         let bond = j.bond;
@@ -428,11 +444,19 @@ pub mod tdcc_exact {
         Ok(())
     }
 
-    /// The arbiter found the challenge wrong: the job settles as if unchallenged, and the
-    /// verifier's bond goes to the provider.
+    /// The arbiter found the challenge wrong, or let its ruling window pass: the job settles as
+    /// if unchallenged, and the verifier's bond goes to the provider. Until the job's
+    /// ruling_deadline only the arbiter may dismiss; after it, anyone may (the arbiter missed
+    /// its window and the receipt stands), so a silent arbiter cannot freeze the escrow.
     pub fn dismiss(ctx: Context<Dismiss>) -> Result<()> {
         let j = &ctx.accounts.job;
         require!(j.state == JobState::Challenged, ExactError::WrongState);
+        if ctx.accounts.caller.key() != ctx.accounts.config.admin {
+            require!(
+                Clock::get()?.slot > j.ruling_deadline,
+                ExactError::ArbiterWindowOpen
+            );
+        }
         let bond = j.bond;
         let a = &ctx.accounts;
         pay_out(
@@ -552,6 +576,7 @@ pub struct ConfigParams {
     pub min_stake: u64,
     pub unstake_cooldown: u64,
     pub challenge_bond: u64,
+    pub arbiter_window: u64,
 }
 
 #[account]
@@ -568,6 +593,7 @@ pub struct Config {
     pub min_stake: u64,
     pub unstake_cooldown: u64,
     pub challenge_bond: u64, // a verifier's deposit per challenge
+    pub arbiter_window: u64, // slots the arbiter has to rule on a challenge
     pub bump: u8,
     pub vault_bump: u8,
 }
@@ -615,6 +641,8 @@ pub struct Job {
     pub verifier: Pubkey,
     pub verifier_fingerprint: [u8; 32],
     pub bond: u64, // the challenger's bond, held in the vault while Challenged
+    pub challenge_slot: u64,
+    pub ruling_deadline: u64, // challenge_slot + arbiter_window
     pub bump: u8,
 }
 
@@ -774,9 +802,8 @@ pub struct Slash<'info> {
 
 #[derive(Accounts)]
 pub struct Dismiss<'info> {
-    pub admin: Signer<'info>,
-    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = admin, has_one = mint,
-              has_one = vault)]
+    pub caller: Signer<'info>, // the arbiter, or anyone after the ruling deadline
+    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = mint, has_one = vault)]
     pub config: Account<'info, Config>,
     #[account(mut, has_one = config)]
     pub job: Account<'info, Job>,
@@ -872,6 +899,7 @@ pub struct Challenged {
     pub verifier: Pubkey,
     pub fingerprint: [u8; 32],
     pub bond: u64,
+    pub ruling_deadline: u64,
 }
 
 #[event]
@@ -928,6 +956,8 @@ pub enum ExactError {
     NotYourJob,
     #[msg("the job was challenged already, and the challenge dismissed")]
     AlreadyChallenged,
+    #[msg("only the arbiter may rule before the ruling deadline")]
+    ArbiterWindowOpen,
 }
 
 #[cfg(test)]

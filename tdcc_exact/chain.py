@@ -240,6 +240,8 @@ class JobAccount:
     verifier: Pubkey
     verifier_fingerprint: bytes
     bond: int
+    challenge_slot: int
+    ruling_deadline: int
 
     @staticmethod
     def decode(d: bytes) -> "JobAccount":
@@ -260,9 +262,10 @@ class JobAccount:
         commitment, fp, root = take(32), take(32), take(32)
         cps = struct.unpack("<I", take(4))[0]
         verifier, vfp = pk(), take(32)
-        bond = q()
+        bond, chs, rul = q(), q(), q()
         return JobAccount(config, renter, provider, job_id, digest, model, price, state,
-                          opened, cd, rd, chd, commitment, fp, root, cps, verifier, vfp, bond)
+                          opened, cd, rd, chd, commitment, fp, root, cps, verifier, vfp, bond,
+                          chs, rul)
 
 
 @dataclass
@@ -296,6 +299,7 @@ class Params:
     min_stake: int = 10_000_000      # 10 USDC
     unstake_cooldown: int = 50
     challenge_bond: int = 1_000_000  # 1 USDC, a verifier's deposit per challenge
+    arbiter_window: int = 16         # slots the arbiter has to rule on a challenge
 
 
 class Market:
@@ -374,7 +378,8 @@ class Market:
         self.treasury = ata(treasury_owner, self.mint)
         data = (u16(params.host_bps) + u16(params.verifier_bps) + u64(params.commit_window)
                 + u64(params.challenge_window) + u64(params.min_stake)
-                + u64(params.unstake_cooldown) + u64(params.challenge_bond))
+                + u64(params.unstake_cooldown) + u64(params.challenge_bond)
+                + u64(params.arbiter_window))
         ixs = [self.token_account_ix(treasury_owner),
                self._ix("initialize",
                         [S(self.admin.pubkey(), True), W(self.config), R(self.mint),
@@ -417,7 +422,7 @@ class Market:
             raise ChainError(f"no config account {self.config}")
         o = 8 + 4 * 32
         hb, vb = struct.unpack("<HH", d[o:o + 4])
-        rest = struct.unpack("<5Q", d[o + 4:o + 44])
+        rest = struct.unpack("<6Q", d[o + 4:o + 52])
         return Params(hb, vb, *rest)
 
     def provider(self, owner: Pubkey) -> ProviderAccount | None:
@@ -492,12 +497,13 @@ class Market:
                         [S(caller, True), R(self.config), W(job), R(self.mint), W(self.vault),
                          W(ata(provider, self.mint)), R(TOKEN_PROGRAM)])
 
-    def dismiss(self, job: Pubkey) -> str:
-        """The arbiter rejects the challenge; the bond goes to the provider."""
+    def dismiss(self, job: Pubkey, caller: Keypair | None = None) -> str:
+        """The arbiter rejects the challenge (or, after the job's ruling deadline, anyone ends
+        it); the bond goes to the provider."""
+        caller = caller or self.admin
         j = self.job(job)
-        return self.rpc.send([self.token_account_ix(j.provider),
-                              self.dismiss_ix(self.admin.pubkey(), job, j.provider)],
-                             self.admin)
+        return self.rpc.send([self.token_account_ix(j.provider, caller.pubkey()),
+                              self.dismiss_ix(caller.pubkey(), job, j.provider)], caller)
 
     def expire(self, payer: Keypair, job: Pubkey) -> str:
         j = self.job(job)

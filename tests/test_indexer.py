@@ -160,7 +160,8 @@ JOB = [("config", "pubkey"), ("renter", "pubkey"), ("provider", "pubkey"),
        ("challenge_deadline", "u64"), ("commitment", "bytes32"),
        ("fingerprint", "bytes32"), ("trace_root", "bytes32"),
        ("checkpoints", "u32"), ("verifier", "pubkey"),
-       ("verifier_fingerprint", "bytes32"), ("bond", "u64"), ("bump", "u8")]
+       ("verifier_fingerprint", "bytes32"), ("bond", "u64"),
+       ("challenge_slot", "u64"), ("ruling_deadline", "u64"), ("bump", "u8")]
 
 
 def _job(state: int, price: int, opened: int, reveal: int, challenge: int, seed: int) -> bytes:

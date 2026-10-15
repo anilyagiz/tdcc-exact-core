@@ -50,7 +50,8 @@ def world():
         rpc.airdrop(k.pubkey(), 2_000_000_000)
     m = Market(rpc, admin, "localnet")
     m.initialize(treasury.pubkey(), Params(commit_window=4, challenge_window=4,
-                                           unstake_cooldown=4, challenge_bond=BOND))
+                                           unstake_cooldown=4, challenge_bond=BOND,
+                                           arbiter_window=4))
     for p in (a, b, c):
         m.mint_to(p.pubkey(), STAKE)
         m.register_provider(p)
@@ -337,3 +338,28 @@ def test_initialize_needs_a_challenge_bond(world):
     world["rpc"].airdrop(m.admin.pubkey(), 1_000_000_000)
     with pytest.raises(ChainError, match="BadParams"):
         m.initialize(Keypair().pubkey(), Params(challenge_bond=0))
+
+
+def test_silent_arbiter_lets_anyone_dismiss_after_the_ruling_deadline(world):
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x0c" * 32)
+    m.challenge(w["verifier"], job, b"\x0d" * 32)
+    j = m.job(job)
+    assert j.ruling_deadline == j.challenge_slot + 4
+    with pytest.raises(ChainError, match="ArbiterWindowOpen"):   # the arbiter's turn
+        m.dismiss(job, w["renter"])
+    w["rpc"].wait_slot(j.ruling_deadline)
+    with pytest.raises(ChainError, match="WindowClosed"):        # too late to slash
+        m.slash(job, 0, 0)
+    a0 = m.balance(w["a"].pubkey())
+    m.dismiss(job, w["renter"])                                   # anyone, now
+    assert m.balance(w["a"].pubkey()) - a0 == BOND
+    assert m.job(job).state == "Revealed"
+
+
+def test_initialize_needs_an_arbiter_window(world):
+    m = Market(world["rpc"], Keypair(), "localnet")
+    world["rpc"].airdrop(m.admin.pubkey(), 1_000_000_000)
+    with pytest.raises(ChainError, match="BadParams"):
+        m.initialize(Keypair().pubkey(), Params(arbiter_window=0))

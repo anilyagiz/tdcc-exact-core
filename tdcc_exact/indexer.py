@@ -107,7 +107,7 @@ EVENTS: dict[str, list[tuple[str, str]]] = {
     "ReceiptRevealed": [("job", "pubkey"), ("fingerprint", "bytes32"),
                         ("trace_root", "bytes32"), ("checkpoints", "u32")],
     "Challenged": [("job", "pubkey"), ("verifier", "pubkey"), ("fingerprint", "bytes32"),
-                   ("bond", "u64")],
+                   ("bond", "u64"), ("ruling_deadline", "u64")],
     "Settled": [("job", "pubkey"), ("provider", "pubkey"), ("host", "u64"), ("fee", "u64")],
     "Slashed": [("job", "pubkey"), ("provider", "pubkey"), ("verifier", "pubkey"),
                 ("refunded", "u64"), ("to_verifier", "u64"), ("to_tdcc", "u64"),
@@ -207,7 +207,7 @@ def events(rpc, program: str = PROGRAM, limit: int = 100, until: str | None = No
 CONFIG_FIELDS = [("admin", "pubkey"), ("mint", "pubkey"), ("treasury", "pubkey"),
                  ("vault", "pubkey"), ("host_bps", "u16"), ("verifier_bps", "u16"),
                  ("commit_window", "u64"), ("challenge_window", "u64"), ("min_stake", "u64"),
-                 ("unstake_cooldown", "u64"), ("challenge_bond", "u64"),
+                 ("unstake_cooldown", "u64"), ("challenge_bond", "u64"), ("arbiter_window", "u64"),
                  ("bump", "u8"), ("vault_bump", "u8")]
 
 LIVE = ("Open", "Committed", "Revealed", "Challenged")      # the escrow is still in the vault
