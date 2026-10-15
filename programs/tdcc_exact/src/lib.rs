@@ -301,7 +301,7 @@ pub mod tdcc_exact {
     }
 
     pub fn reveal_receipt(
-        ctx: Context<ProviderJob>,
+        ctx: Context<RevealReceipt>,
         fingerprint: [u8; 32],
         salt: [u8; 32],
         model_hash: [u8; 32],
@@ -309,6 +309,13 @@ pub mod tdcc_exact {
         checkpoints: u32,
     ) -> Result<()> {
         let challenge_window = ctx.accounts.config.challenge_window;
+        // A provider slashed on another job (stake zeroed) must not go on revealing and being
+        // paid for its other open jobs, which later slashes could no longer punish: they are
+        // left to expire and refund the renter.
+        require!(
+            ctx.accounts.provider.stake >= ctx.accounts.config.min_stake,
+            ExactError::ProviderNotStaked
+        );
         let owner = ctx.accounts.owner.key();
         let j = &mut ctx.accounts.job;
         let now = Clock::get()?.slot;
@@ -810,6 +817,17 @@ pub struct ProviderJob<'info> {
     pub config: Account<'info, Config>,
     #[account(mut, has_one = config, constraint = job.provider == owner.key() @ ExactError::NotYourJob)]
     pub job: Account<'info, Job>,
+}
+
+#[derive(Accounts)]
+pub struct RevealReceipt<'info> {
+    pub owner: Signer<'info>,
+    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut, has_one = config, constraint = job.provider == owner.key() @ ExactError::NotYourJob)]
+    pub job: Account<'info, Job>,
+    #[account(seeds = [b"provider", config.key().as_ref(), owner.key().as_ref()], bump = provider.bump)]
+    pub provider: Account<'info, Provider>,
 }
 
 #[derive(Accounts)]

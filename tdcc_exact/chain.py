@@ -464,12 +464,17 @@ class Market:
                                        [S(owner.pubkey()), R(self.config), W(job)],
                                        b32(commitment))], owner)
 
+    def reveal_ix(self, owner: Pubkey, job: Pubkey, fingerprint: bytes, salt: bytes,
+                  model_hash: bytes, trace_root: bytes, checkpoints: int) -> Instruction:
+        data = b32(fingerprint) + b32(salt) + b32(model_hash) + b32(trace_root) + u32(checkpoints)
+        return self._ix("reveal_receipt",
+                        [S(owner), R(self.config), W(job), R(self.provider_pda(owner))], data)
+
     def reveal_receipt(self, owner: Keypair, job: Pubkey, fingerprint: bytes, salt: bytes,
                        model_hash: bytes, trace_root: bytes, checkpoints: int) -> str:
-        data = b32(fingerprint) + b32(salt) + b32(model_hash) + b32(trace_root) + u32(checkpoints)
-        return self.rpc.send([self._ix("reveal_receipt",
-                                       [S(owner.pubkey()), R(self.config), W(job)], data)],
-                             owner)
+        """Open the commitment (the provider must still hold the minimum stake)."""
+        return self.rpc.send([self.reveal_ix(owner.pubkey(), job, fingerprint, salt, model_hash,
+                                             trace_root, checkpoints)], owner)
 
     def challenge_ix(self, verifier: Pubkey, job: Pubkey, fingerprint: bytes) -> Instruction:
         return self._ix("challenge",
@@ -498,18 +503,22 @@ class Market:
                                        [S(self.admin.pubkey()), W(self.config)],
                                        bytes(arbiter))], self.admin)
 
+    def slash_ix(self, job: Pubkey, renter: Pubkey, provider: Pubkey, verifier: Pubkey,
+                 divergence_index: int, fault_step: int) -> Instruction:
+        return self._ix("slash",
+                        [S(self.arbiter.pubkey()), R(self.config), W(job),
+                         W(self.provider_pda(provider)), R(self.mint), W(self.vault),
+                         W(ata(renter, self.mint)), W(ata(verifier, self.mint)),
+                         W(self.treasury), R(TOKEN_PROGRAM)],
+                        u32(divergence_index) + u64(fault_step))
+
     def slash(self, job: Pubkey, divergence_index: int, fault_step: int) -> str:
         """The arbiter's ruling for the verifier (the admin pays the fee and the verifier's
         token account if it has none)."""
         j = self.job(job)
         return self.rpc.send([self.token_account_ix(j.verifier),
-                              self._ix("slash",
-                                       [S(self.arbiter.pubkey()), R(self.config), W(job),
-                                        W(self.provider_pda(j.provider)), R(self.mint),
-                                        W(self.vault), W(ata(j.renter, self.mint)),
-                                        W(ata(j.verifier, self.mint)), W(self.treasury),
-                                        R(TOKEN_PROGRAM)],
-                                       u32(divergence_index) + u64(fault_step))],
+                              self.slash_ix(job, j.renter, j.provider, j.verifier,
+                                            divergence_index, fault_step)],
                              self.admin, self.arbiter)
 
     def dismiss_ix(self, caller: Pubkey, job: Pubkey, provider: Pubkey) -> Instruction:

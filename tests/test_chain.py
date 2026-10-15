@@ -502,3 +502,27 @@ def test_the_unstake_cooldown_outlasts_a_job(world):
     with pytest.raises(ChainError, match="BadParams"):
         m.initialize(Keypair().pubkey(), p)
     m.initialize(Keypair().pubkey(), dataclasses.replace(p, unstake_cooldown=p.job_life + 1))
+
+
+def test_a_slashed_provider_cannot_reveal_its_other_jobs(world):
+    """Slashed on one job (stake zeroed), the provider's other committed job is not revealed
+    and paid: it expires and the renter gets the escrow back. Reveal, challenge and slash of
+    the first job go in one transaction, so the second is still inside its reveal window."""
+    w, m, rpc = world, world["m"], world["rpc"]
+    d = _provider(w)
+    j1, j2 = _open(w, d), _open(w, d)
+    fp, salts = b"\x1f" * 32, (os.urandom(32), os.urandom(32))
+    for j, salt in zip((j1, j2), salts):
+        m.commit_receipt(d, j, commitment(fp, bytes(d.pubkey()), salt))
+    rpc.wait_slot(max(m.job(j).commit_deadline for j in (j1, j2)))
+    rpc.send([m.reveal_ix(d.pubkey(), j1, fp, salts[0], MODEL, bytes(32), 3),
+              m.challenge_ix(w["verifier"].pubkey(), j1, b"\x20" * 32),
+              m.slash_ix(j1, w["renter"].pubkey(), d.pubkey(), w["verifier"].pubkey(), 1, 7)],
+             w["admin"], d, w["verifier"], w["arbiter"])
+    assert m.provider(d.pubkey()).stake == 0
+    with pytest.raises(ChainError, match="ProviderNotStaked"):
+        m.reveal_receipt(d, j2, fp, salts[1], MODEL, bytes(32), 3)
+    rpc.wait_slot(m.job(j2).reveal_deadline)
+    r0 = m.balance(w["renter"].pubkey())
+    m.expire(w["renter"], j2)
+    assert m.balance(w["renter"].pubkey()) - r0 == PRICE
