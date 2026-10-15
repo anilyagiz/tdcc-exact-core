@@ -128,7 +128,7 @@ class FakeChain:
             provider=provider, job_digest=job_digest, model_hash=model_hash, state="Open",
             opened_slot=self.now, commit_deadline=self.now + window,
             reveal_deadline=self.now + 2 * window, challenge_deadline=0,
-            commitment=bytes(32), fingerprint=bytes(32), trace_root=bytes(32))
+            commitment=bytes(32), fingerprint=bytes(32), trace_root=bytes(32), checkpoints=0)
 
     def jobs(self, provider=None, states=None):
         return [(k, j) for k, j in sorted(self.jobs_.items(), key=lambda x: str(x[0]))
@@ -148,7 +148,7 @@ class FakeChain:
         assert j.state == "Committed" and j.commit_deadline < self.now <= j.reveal_deadline
         assert commitment(fp, bytes(owner.pubkey()), salt) == j.commitment
         assert model_hash == j.model_hash
-        j.fingerprint, j.trace_root, j.state = fp, root, "Revealed"
+        j.fingerprint, j.trace_root, j.checkpoints, j.state = fp, root, cps, "Revealed"
         j.challenge_deadline = self.now + 10
         self.sent.append(("reveal", key))
         return f"sig-reveal-{len(self.sent)}"
@@ -273,3 +273,4 @@ def test_verifier_sampling(fake):
     assert not any(_verifier(fake, rate=0.0).sampled(k) for k in keys)
     assert all(_verifier(fake, rate=1.0).sampled(k) for k in keys)
     assert 25 < sum(_verifier(fake, rate=0.25).sampled(k) for k in keys) < 80
+

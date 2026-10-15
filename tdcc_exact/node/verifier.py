@@ -13,7 +13,7 @@ import hashlib
 import time
 
 from ..trace import EVERY
-from .common import Models, StateFile, run
+from .common import Models, StateFile, verdict
 from .store import NotFound, StoreError, Tampered
 
 
@@ -75,22 +75,19 @@ class VerifierNode:
                                                        f"on-chain one: {e}")
         except NotFound:
             raise StoreError(f"job {j.job_digest.hex()[:16]}.. is not in the store")
-        mine = run(job, "verifier", self.models, self.every, job_key=bytes(key)).receipt
+        v = verdict(job, j, self.models, self.every)
         try:
             self.store.get_trace(j.trace_root.hex())
             trace = "available"
         except StoreError:
             trace = "missing"
-        info = dict(posted=j.fingerprint.hex(), rerun=mine.fingerprint, answer=mine.answer,
-                    provider=str(j.provider), trace=trace)
-        if mine.fingerprint == j.fingerprint.hex():
+        info = dict(posted=j.fingerprint.hex(), rerun=v["re_run"], provider=str(j.provider),
+                    trace=trace)
+        if v["verdict"] == "ACCEPT":
             return self._record(k, "accepted", **info)
-        why = [f"{n}" for n, a, b in (("model_hash", mine.model_hash, j.model_hash.hex()),
-                                      ("trace_root", mine.trace_root, j.trace_root.hex()))
-               if a != b]
+        why = v.get("why") or "fingerprint mismatch" + (
+            f": {', '.join(v['differs'])} differ" if v["differs"] else "")
         if self.chain.slot() > j.challenge_deadline:
-            return self._record(k, "late", why="mismatch after the challenge window", **info)
-        sig = self.chain.challenge(self.owner, key, bytes.fromhex(mine.fingerprint))
-        return self._record(k, "challenged", sig=sig,
-                            why="fingerprint mismatch" + (f": {', '.join(why)} differ"
-                                                          if why else ""), **info)
+            return self._record(k, "late", why=f"{why}, after the challenge window", **info)
+        sig = self.chain.challenge(self.owner, key, bytes.fromhex(v["re_run"]))
+        return self._record(k, "challenged", sig=sig, why=why, **info)

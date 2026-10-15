@@ -155,6 +155,10 @@ class ProviderNode:
         if want != j.model_hash.hex():
             return self._refuse(k, f"on-chain model hash {j.model_hash.hex()[:16]}.. is not "
                                    f"the registered {want[:16]}..")
+        try:
+            job.check(getattr(self.models.get(job.model)[0], "vocab", None))
+        except ValueError as e:
+            return self._refuse(k, f"no run can answer this job: {e}")
         res = run(job, str(self.owner.pubkey()), self.models, self.every, self.skip_layer,
                   job_key=bytes(key))
         r = res.receipt

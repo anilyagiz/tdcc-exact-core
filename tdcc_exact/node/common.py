@@ -7,7 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from ..oracle import TINY, Job, layers_of, load_model, run_job
+from ..oracle import Job, Receipt, is_tiny, layers_of, load_model, run_job
 from ..trace import EVERY
 
 
@@ -20,7 +20,7 @@ class Models:
         self._cache: dict = {}
 
     def path(self, model: str) -> str:
-        if model.startswith(TINY) or self.dir is None or Path(model).exists():
+        if is_tiny(model) or self.dir is None or Path(model).exists():
             return model
         return str(Path(self.dir) / Path(model).name)
 
@@ -41,6 +41,24 @@ def run(job: Job, who: str, models: Models, every: int = EVERY, skip_layer: int 
     local = Job(**{**job.__dict__, "model": models.path(job.model)})
     # (job_key is unused until run_job takes the binding: then binding=bytes(job_key) here)
     return run_job(local, who, cheat, every=every, model=model)
+
+
+def verdict(job: Job, j, models: Models, every: int = EVERY) -> dict:
+    """cli.verify on the receipt a Job account holds (fingerprint, model hash, trace root:
+    the chain keeps no answer, logits hash or step count, so only those fields compare).
+    {"verdict": ACCEPT | CHALLENGE | REJECT, "re_run": fingerprint, ...}; a REJECT (the
+    model build is not the registry's) re-runs here too, for the fingerprint to challenge
+    with."""
+    from ..cli import verify
+    rec = Receipt(job.job_id, str(j.provider), "", j.model_hash.hex(), "", j.trace_root.hex(),
+                  0, j.checkpoints, j.fingerprint.hex())
+    local = Job(**{**job.__dict__, "model": models.path(job.model)})
+    v = verify(local, rec, every)
+    v["differs"] = {k: d for k, d in v.get("differs", {}).items()
+                    if k in ("model_hash", "trace_root")}
+    if v["verdict"] == "REJECT":
+        v["re_run"] = run(job, "verifier", models, every).receipt.fingerprint
+    return v
 
 
 class StateFile:
