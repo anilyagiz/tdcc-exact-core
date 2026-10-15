@@ -101,9 +101,9 @@ def test_caught_provider_is_slashed(world):
     impostor = copy.copy(m)
     impostor.admin = w["verifier"]
     with pytest.raises(ChainError, match="ConstraintHasOne"):                 # only the arbiter slashes
-        impostor.slash(job, 4, 1234)
+        impostor.slash(job, 1, 1234)
     r0, v0, t0 = (m.balance(w[k].pubkey()) for k in ("renter", "verifier", "treasury"))
-    m.slash(job, 4, 1234)
+    m.slash(job, 1, 1234)
     want = {t[0]: t[1] for t in slash("j", "B", "renter", "verifier", PRICE, STAKE).transfers}
     assert m.balance(w["renter"].pubkey()) - r0 == want["renter"]
     assert m.balance(w["verifier"].pubkey()) - v0 == want["verifier"]
@@ -212,3 +212,15 @@ def test_a_job_must_pay_something(world):
     w, m = world, world["m"]
     with pytest.raises(ChainError, match="BadParams"):
         m.open_job(w["renter"], w["a"].pubkey(), 9_999, bytes(32), MODEL, 0)
+
+
+def test_the_slash_names_a_checkpoint_the_receipt_has(world):
+    """The arbiter's ruling points into the posted trace: index <= its checkpoint count (the
+    count itself: the provider's list stopped early)."""
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x0e" * 32)                  # 3 checkpoints
+    m.challenge(w["verifier"], job, b"\x0f" * 32)
+    with pytest.raises(ChainError, match="BadParams"):
+        m.slash(job, 4, 1234)
+    m.dismiss(job)

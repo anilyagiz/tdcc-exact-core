@@ -334,6 +334,8 @@ pub mod tdcc_exact {
         let c = &ctx.accounts.config;
         let j = &ctx.accounts.job;
         require!(j.state == JobState::Challenged, ExactError::WrongState);
+        // the ruling points into the posted trace (== count: the provider's list stopped early)
+        require!(divergence_index <= j.checkpoints, ExactError::BadParams);
         let stake = ctx.accounts.provider.stake;
         let (to_verifier, to_tdcc) = math::slash(stake, c.verifier_bps);
         let price = j.price;
