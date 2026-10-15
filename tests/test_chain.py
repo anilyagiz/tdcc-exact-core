@@ -18,15 +18,16 @@ from solders.keypair import Keypair  # noqa: E402
 
 from tdcc_exact.chain import ChainError, Market, Params, Rpc, ata  # noqa: E402
 from tdcc_exact.commit import commitment  # noqa: E402
-from tdcc_exact.settle import accept, dismiss, slash  # noqa: E402
+from tdcc_exact.settle import accept, dismiss, expire, slash  # noqa: E402
 
 URL = os.environ.get("TDCC_EXACT_RPC", "http://127.0.0.1:8899")
 PRICE, STAKE = 2_000_001, 50_000_001          # odd: the rounding is the program's
 BOND = 1_000_003
 # windows in slots (~0.4 s each): wide enough that a loaded runner still commits, reveals and
 # challenges inside them (4 slots flaked), short enough to keep the suite quick
+PENALTY = 3_000_007
 WORLD = Params(commit_window=10, challenge_window=8, arbiter_window=6, unstake_cooldown=35,
-               challenge_bond=BOND)
+               challenge_bond=BOND, non_reveal_penalty=PENALTY)
 MODEL = bytes([7]) * 32
 
 
@@ -183,9 +184,10 @@ def test_unrevealed_job_expires_back_to_the_renter(world):
     with pytest.raises(ChainError, match="WindowOpen"):                 # not before the reveal deadline
         m.expire(w["renter"], job)
     w["rpc"].wait_slot(m.job(job).reveal_deadline)
-    r0 = m.balance(w["renter"].pubkey())
+    r0, s0 = m.balance(w["renter"].pubkey()), m.provider(w["a"].pubkey()).stake
     sig = m.expire(w["renter"], job)
-    assert m.balance(w["renter"].pubkey()) - r0 == PRICE
+    assert m.balance(w["renter"].pubkey()) - r0 == PRICE           # never committed: no penalty
+    assert m.provider(w["a"].pubkey()).stake == s0
     assert _events(w, sig) == ["Expired"]
     assert m.job(job).state == "Expired"
 
@@ -302,14 +304,19 @@ def test_a_challenge_after_the_window_is_refused(world):
 
 
 def test_a_committed_but_unrevealed_job_expires(world):
-    """The provider committed, then never revealed: the renter still gets the escrow back."""
+    """The provider committed, then never revealed: the renter gets the escrow back and the
+    non-reveal penalty out of the provider's stake (withholding is not free)."""
     w, m = world, world["m"]
     job = _open(w, w["a"])
     m.commit_receipt(w["a"], job, b"\x12" * 32)
     w["rpc"].wait_slot(m.job(job).reveal_deadline)
-    r0 = m.balance(w["renter"].pubkey())
+    r0, s0 = m.balance(w["renter"].pubkey()), m.provider(w["a"].pubkey()).stake
     m.expire(w["renter"], job)
-    assert m.balance(w["renter"].pubkey()) - r0 == PRICE
+    want = {}
+    for t in expire("j", "A", "renter", PRICE, True, PENALTY, s0).transfers:
+        want[t[0]] = want.get(t[0], 0) + t[1]
+    assert m.balance(w["renter"].pubkey()) - r0 == want["renter"] == PRICE + PENALTY
+    assert m.provider(w["a"].pubkey()).stake - s0 == want["A"] == -PENALTY
     assert m.job(job).state == "Expired"
 
 

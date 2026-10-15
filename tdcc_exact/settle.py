@@ -55,6 +55,18 @@ def slash(job_id: str, provider: str, renter: str, verifier: str, price: int,
     return Settlement(job_id, "slashed", provider, t)
 
 
+def expire(job_id: str, provider: str, renter: str, price: int, committed: bool,
+           penalty: int, stake: int) -> Settlement:
+    """No reveal by the deadline: the escrow back to the renter and, if the provider committed
+    (and withheld the reveal), the config's non-reveal penalty from its stake, at most all of
+    it."""
+    t = [[renter, price, "escrow refunded"]]
+    pen = min(penalty, stake) if committed else 0
+    if pen:
+        t += [[renter, pen, "non-reveal penalty"], [provider, -pen, "stake, non-reveal penalty"]]
+    return Settlement(job_id, "expired", provider, t)
+
+
 def dismiss(job_id: str, provider: str, verifier: str, bond: int) -> Settlement:
     """The challenge is rejected: the verifier's bond pays the provider for the delay (the job
     then settles as accept() says)."""

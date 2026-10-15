@@ -100,7 +100,8 @@ EVENTS: dict[str, list[tuple[str, str]]] = {
     "ProviderRegistered": [("provider", "pubkey")],
     "UnstakeRequested": [("provider", "pubkey"), ("unlock_slot", "u64")],
     "Unstaked": [("provider", "pubkey"), ("amount", "u64")],
-    "Expired": [("job", "pubkey"), ("renter", "pubkey"), ("refunded", "u64")],
+    "Expired": [("job", "pubkey"), ("renter", "pubkey"), ("refunded", "u64"),
+                ("penalty", "u64")],
     "JobClosed": [("job", "pubkey"), ("renter", "pubkey"), ("rent", "u64")],
     "Staked": [("provider", "pubkey"), ("amount", "u64"), ("stake", "u64")],
     "JobOpened": [("job", "pubkey"), ("renter", "pubkey"), ("provider", "pubkey"),
@@ -210,7 +211,8 @@ CONFIG_FIELDS = [("admin", "pubkey"), ("mint", "pubkey"), ("treasury", "pubkey")
                  ("vault", "pubkey"), ("arbiter", "pubkey"), ("host_bps", "u16"),
                  ("verifier_bps", "u16"), ("commit_window", "u64"), ("challenge_window", "u64"),
                  ("min_stake", "u64"), ("unstake_cooldown", "u64"), ("challenge_bond", "u64"),
-                 ("arbiter_window", "u64"), ("bump", "u8"), ("vault_bump", "u8")]
+                 ("arbiter_window", "u64"), ("non_reveal_penalty", "u64"), ("bump", "u8"),
+                 ("vault_bump", "u8")]
 
 LIVE = ("Open", "Committed", "Revealed", "Challenged")      # the escrow is still in the vault
 

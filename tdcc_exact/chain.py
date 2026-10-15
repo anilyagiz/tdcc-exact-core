@@ -301,6 +301,7 @@ class Params:
     challenge_bond: int = 1_000_000  # 1 USDC, a verifier's deposit per challenge
     arbiter_window: int = 16         # slots the arbiter has to rule on a challenge
     arbiter: Pubkey | None = None    # who rules on challenges (None: the admin)
+    non_reveal_penalty: int = 2_000_000  # stake to the renter for a commit never revealed
 
     @property
     def job_life(self) -> int:
@@ -389,7 +390,8 @@ class Market:
                 + u64(params.challenge_window) + u64(params.min_stake)
                 + u64(params.unstake_cooldown) + u64(params.challenge_bond)
                 + u64(params.arbiter_window)
-                + bytes(params.arbiter or self.admin.pubkey()))
+                + bytes(params.arbiter or self.admin.pubkey())
+                + u64(params.non_reveal_penalty))
         ixs = [self.token_account_ix(treasury_owner),
                self._ix("initialize",
                         [S(self.admin.pubkey(), True), W(self.config), R(self.mint),
@@ -432,9 +434,10 @@ class Market:
             raise ChainError(f"no config account {self.config}")
         o = 8 + 5 * 32
         hb, vb = struct.unpack("<HH", d[o:o + 4])
-        cw, chw, ms, uc, bond, aw = struct.unpack("<6Q", d[o + 4:o + 52])
+        cw, chw, ms, uc, bond, aw, pen = struct.unpack("<7Q", d[o + 4:o + 60])
         return Params(hb, vb, cw, chw, ms, uc, bond, aw,
-                      arbiter=Pubkey.from_bytes(d[8 + 4 * 32:8 + 5 * 32]))
+                      arbiter=Pubkey.from_bytes(d[8 + 4 * 32:8 + 5 * 32]),
+                      non_reveal_penalty=pen)
 
     def provider(self, owner: Pubkey) -> ProviderAccount | None:
         d = self.rpc.account(self.provider_pda(owner))

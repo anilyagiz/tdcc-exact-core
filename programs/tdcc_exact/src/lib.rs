@@ -119,6 +119,7 @@ pub mod tdcc_exact {
         c.unstake_cooldown = params.unstake_cooldown;
         c.challenge_bond = params.challenge_bond;
         c.arbiter_window = params.arbiter_window;
+        c.non_reveal_penalty = params.non_reveal_penalty;
         c.bump = ctx.bumps.config;
         c.vault_bump = ctx.bumps.vault;
         emit!(Initialized {
@@ -526,7 +527,10 @@ pub mod tdcc_exact {
         Ok(())
     }
 
-    /// No reveal by the reveal deadline: the renter takes the escrow back.
+    /// No reveal by the reveal deadline: the renter takes the escrow back. A provider that
+    /// committed and then withheld its reveal (seeing the job was being watched, say) also pays
+    /// the renter non_reveal_penalty out of its stake (at most what is left of it), so
+    /// withholding is not free; an Open job (never committed) expires without penalty.
     pub fn expire(ctx: Context<Expire>) -> Result<()> {
         let j = &ctx.accounts.job;
         require!(
@@ -538,6 +542,14 @@ pub mod tdcc_exact {
             ExactError::WindowOpen
         );
         let price = j.price;
+        let penalty = if j.state == JobState::Committed {
+            ctx.accounts
+                .config
+                .non_reveal_penalty
+                .min(ctx.accounts.provider.stake)
+        } else {
+            0
+        };
         let a = &ctx.accounts;
         pay_out(
             &a.token_program,
@@ -545,17 +557,19 @@ pub mod tdcc_exact {
             &a.renter_token,
             &a.mint,
             &a.config,
-            price,
+            price.checked_add(penalty).ok_or(ExactError::Overflow)?,
         )?;
         let job_key = ctx.accounts.job.key();
         let renter = ctx.accounts.job.renter;
         ctx.accounts.job.state = JobState::Expired;
         let p = &mut ctx.accounts.provider;
+        p.stake -= penalty; // penalty <= stake
         p.open_jobs = p.open_jobs.saturating_sub(1);
         emit!(Expired {
             job: job_key,
             renter,
-            refunded: price
+            refunded: price,
+            penalty
         });
         Ok(())
     }
@@ -644,6 +658,7 @@ pub struct ConfigParams {
     pub challenge_bond: u64,
     pub arbiter_window: u64,
     pub arbiter: Pubkey,
+    pub non_reveal_penalty: u64,
 }
 
 #[account]
@@ -662,6 +677,7 @@ pub struct Config {
     pub unstake_cooldown: u64,
     pub challenge_bond: u64, // a verifier's deposit per challenge
     pub arbiter_window: u64, // slots the arbiter has to rule on a challenge
+    pub non_reveal_penalty: u64, // from the stake to the renter when a commit is not revealed
     pub bump: u8,
     pub vault_bump: u8,
 }
@@ -967,6 +983,7 @@ pub struct Expired {
     pub job: Pubkey,
     pub renter: Pubkey,
     pub refunded: u64,
+    pub penalty: u64, // from the provider's stake, for a commit it did not reveal
 }
 
 #[event]
