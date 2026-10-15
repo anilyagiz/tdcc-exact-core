@@ -73,17 +73,21 @@ tdcc-exact demo
 ```
 1. renter opens a yes/no oracle job on tiny, locks 2.00 USDC
 2. provider A runs it honestly; provider B skips layer 1 to save time
-   A: NO  0242d4a0...
-   B: NO  c9319991...  (168 matrix multiplies skipped: same answer, other fingerprint)
+   A: NO  165e6a99...
+   B: NO  87644c96...  (168 matrix multiplies skipped: same answer, other fingerprint)
 3. a verifier re-runs the job on this laptop
    A: match -> accept
    B: MISMATCH -> challenge
 4. searching B's trace for the first instruction that went wrong
-   bisection: checkpoint 0 of 3 differs (2 rounds), steps 1..1302
+   bisection: checkpoint 0 of 4 differs (2 rounds), steps 1..1302
    first fault: step 659, slice 0, pc 11 (state)
-     MM ... ; mm 1x256 . 128x256^T
+     MM ... ; mm 8x256 . 128x256^T
 5. settlement (the Solana program executes these transfers)
 ```
+
+The fingerprints differ from run to run: every job carries a random nonce, and every run is
+bound to its job (on-chain, the Job account's address), so no two jobs share a fingerprint
+and none can be copied from another.
 
 On a real model, LFM2.5-230M (about 6 minutes on the simulator; the `model` extra brings its
 tokenizer and the `hf` command):
@@ -126,8 +130,8 @@ tdcc-exact demo --localnet
 1. renter opens the oracle job on tiny with A and with B, 2.00 USDC each into escrow
    open_job: https://explorer.solana.com/tx/3FefAq...
 2. A runs it honestly; B skips layer 1 to save time
-   A: NO   fingerprint 0242d4a0cc8e6003..  commit https://explorer.solana.com/tx/2DBA3c...
-   B: NO   fingerprint c9319991ddc653d4..  commit https://explorer.solana.com/tx/3rGpt6...
+   A: NO   fingerprint 165e6a999aa2a250..  commit https://explorer.solana.com/tx/2DBA3c...
+   B: NO   fingerprint 87644c96c0d26767..  commit https://explorer.solana.com/tx/3rGpt6...
    A reveals: ...   B reveals: ...
 3. a verifier re-runs the job on this laptop
    A: match -> accept
