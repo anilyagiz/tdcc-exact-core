@@ -296,6 +296,15 @@ def test_a_new_keypair_file_is_never_readable_by_others(tmp_path, monkeypatch):
     assert chain.keypair("localnet", "renter").pubkey() == k.pubkey()   # read back the same
 
 
+def test_only_tiny_and_tiny_seed_name_the_random_model():
+    from tdcc_exact.oracle import is_tiny, model_name
+    assert is_tiny("tiny") and is_tiny("tiny:3")
+    assert not is_tiny("tinyllama-1.1b") and not is_tiny("models/tiny")
+    assert model_name("models/tinyllama-1.1b") == "tinyllama-1.1b"
+    with pytest.raises(ValueError):
+        is_tiny("tiny:abc")
+
+
 def test_the_verifier_needs_no_fcntl():
     """Verifiers run on any laptop, Windows included: nothing on tdcc-exact's path may import
     fcntl (only the card and RTL hosts in opentpu/ do)."""

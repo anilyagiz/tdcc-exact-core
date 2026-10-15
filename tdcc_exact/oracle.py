@@ -71,9 +71,20 @@ class Job:
         return Job(**json.loads(Path(path).read_text()))
 
 
+def is_tiny(model: str) -> bool:
+    """The built-in random model: "tiny" or "tiny:<seed>" (not every name starting "tiny")."""
+    if model == TINY:
+        return True
+    if not model.startswith(TINY + ":"):
+        return False
+    if not model[len(TINY) + 1:].isdigit():
+        raise ValueError(f"{model}: the tiny model's seed is a number (tiny:0, tiny:1, ...)")
+    return True
+
+
 def model_name(model: str) -> str:
     """A job's model by name (the directory's last part): the image hash pins the weights."""
-    return model if model.startswith(TINY) else Path(model).name
+    return model if is_tiny(model) else Path(model).name
 
 
 @dataclass
@@ -128,7 +139,7 @@ def tiny_model(seed: int = 0):
 
 
 def load_model(model: str):
-    if model.startswith(TINY):
+    if is_tiny(model):
         return tiny_model(int(model.split(":")[1]) if ":" in model else 0)
     from opentpu.llm import load_spec
     from opentpu.llm.qwen3 import load_weights
@@ -142,7 +153,7 @@ def layers_of(spec) -> int:
 # ------------------------------------------------------------------------------- jobs
 def new_job(model: str, question: str, job_id: str = "") -> Job:
     """An oracle job: the question in the model's chat template, answered Yes or No."""
-    if model.startswith(TINY):
+    if is_tiny(model):
         ids = [1 + (b % 500) for b in question.encode()][:24] or [1]
         return Job(model, ids, yes_id=3, no_id=4, question=question, job_id=job_id)
     from transformers import AutoTokenizer
