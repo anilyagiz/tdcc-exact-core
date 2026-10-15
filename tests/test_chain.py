@@ -16,7 +16,7 @@ solders = pytest.importorskip("solders")
 
 from solders.keypair import Keypair  # noqa: E402
 
-from tdcc_exact.chain import ChainError, Market, Params, Rpc  # noqa: E402
+from tdcc_exact.chain import ChainError, Market, Params, Rpc, ata  # noqa: E402
 from tdcc_exact.commit import commitment  # noqa: E402
 from tdcc_exact.settle import accept, slash  # noqa: E402
 
@@ -240,12 +240,18 @@ def test_the_slash_names_a_checkpoint_the_receipt_has(world):
     """The arbiter's ruling points into the posted trace: index <= its checkpoint count (the
     count itself: the provider's list stopped early)."""
     w, m = world, world["m"]
-    job = _open(w, w["a"])
-    _post(w, w["a"], job, b"\x0e" * 32)                  # 3 checkpoints
+    d = Keypair()                                         # its own provider: this one is slashed
+    w["rpc"].airdrop(d.pubkey(), 2_000_000_000)
+    m.mint_to(d.pubkey(), STAKE)
+    m.register_provider(d)
+    m.stake(d, STAKE)
+    job = _open(w, d)
+    _post(w, d, job, b"\x0e" * 32)                       # 3 checkpoints
     m.challenge(w["verifier"], job, b"\x0f" * 32)
     with pytest.raises(ChainError, match="BadParams"):
         m.slash(job, 4, 1234)
-    m.dismiss(job)
+    m.slash(job, 3, 1234)                     # == the count: the provider's list stopped early
+    assert m.job(job).state == "Slashed"
 
 
 @pytest.mark.parametrize("bad", [dict(commit_window=0), dict(challenge_window=0),
@@ -268,3 +274,37 @@ def test_a_new_market_and_provider_are_announced(world):
     m = Market(rpc, admin, "localnet")
     assert "Initialized" in _events(world, m.initialize(Keypair().pubkey(), Params()))
     assert _events(world, m.register_provider(p)) == ["ProviderRegistered"]
+
+
+def test_a_challenge_after_the_window_is_refused(world):
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x10" * 32)
+    w["rpc"].wait_slot(m.job(job).challenge_deadline)
+    with pytest.raises(ChainError, match="WindowClosed"):
+        m.challenge(w["verifier"], job, b"\x11" * 32)
+    m.settle(w["admin"], job)
+
+
+def test_a_committed_but_unrevealed_job_expires(world):
+    """The provider committed, then never revealed: the renter still gets the escrow back."""
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    m.commit_receipt(w["a"], job, b"\x12" * 32)
+    w["rpc"].wait_slot(m.job(job).reveal_deadline)
+    r0 = m.balance(w["renter"].pubkey())
+    m.expire(w["renter"], job)
+    assert m.balance(w["renter"].pubkey()) - r0 == PRICE
+    assert m.job(job).state == "Expired"
+
+
+def test_settle_pays_only_the_market_treasury(world):
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x13" * 32)
+    w["rpc"].wait_slot(m.job(job).challenge_deadline)
+    thief = copy.copy(m)
+    thief.treasury = ata(w["verifier"].pubkey(), m.mint)    # someone else's USDC account
+    with pytest.raises(ChainError, match="ConstraintHasOne"):
+        thief.settle(w["admin"], job)
+    m.settle(w["admin"], job)
