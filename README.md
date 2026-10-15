@@ -61,9 +61,11 @@ log uses.
 
 ## Try the demo
 
-Runs on a laptop, no card, in about 10 seconds on the built-in tiny model:
+Runs on a laptop, no card, in about 10 seconds on the built-in tiny model (Python 3.10 or
+newer; Linux, macOS or Windows):
 
 ```sh
+git clone https://github.com/anilyagiz/tdcc-exact-core && cd tdcc-exact-core
 pip install -e .
 tdcc-exact demo
 ```
