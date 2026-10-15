@@ -374,6 +374,20 @@ class Market:
                                         R(self.mint), W(ata(o, self.mint)), W(self.vault),
                                         R(TOKEN_PROGRAM)], u64(amount))], owner)
 
+    def request_unstake(self, owner: Keypair) -> str:
+        """Start the unstake cooldown; the provider takes no new jobs from now on."""
+        o = owner.pubkey()
+        return self.rpc.send([self._ix("request_unstake",
+                                       [S(o), R(self.config), W(self.provider_pda(o))])], owner)
+
+    def unstake(self, owner: Keypair) -> str:
+        """The whole stake back, once the cooldown is over and no job of the provider is open."""
+        o = owner.pubkey()
+        return self.rpc.send([self._ix("unstake",
+                                       [S(o), R(self.config), W(self.provider_pda(o)),
+                                        R(self.mint), W(ata(o, self.mint)), W(self.vault),
+                                        R(TOKEN_PROGRAM)])], owner)
+
     def provider(self, owner: Pubkey) -> ProviderAccount | None:
         d = self.rpc.account(self.provider_pda(owner))
         return None if d is None else ProviderAccount.decode(d)

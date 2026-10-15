@@ -44,19 +44,19 @@ pytestmark = pytest.mark.skipif(not _up(), reason=f"no validator with the progra
 def world():
     rpc = Rpc(URL)
     admin, renter, verifier = Keypair(), Keypair(), Keypair()
-    a, b, treasury = Keypair(), Keypair(), Keypair()
-    for k in (admin, renter, verifier, a, b):
+    a, b, c, treasury = Keypair(), Keypair(), Keypair(), Keypair()
+    for k in (admin, renter, verifier, a, b, c):
         rpc.airdrop(k.pubkey(), 2_000_000_000)
     m = Market(rpc, admin, "localnet")
     m.initialize(treasury.pubkey(), Params(commit_window=4, challenge_window=4,
                                            unstake_cooldown=4))
-    for p in (a, b):
+    for p in (a, b, c):
         m.mint_to(p.pubkey(), STAKE)
         m.register_provider(p)
         m.stake(p, STAKE)
     m.mint_to(renter.pubkey(), 100 * PRICE)
     m.mint_to(verifier.pubkey(), 0)
-    return dict(m=m, rpc=rpc, admin=admin, renter=renter, verifier=verifier, a=a, b=b,
+    return dict(m=m, rpc=rpc, admin=admin, renter=renter, verifier=verifier, a=a, b=b, c=c,
                 treasury=treasury, next=[1])
 
 
@@ -169,3 +169,24 @@ def test_dismissed_challenge_settles(world):
     w["rpc"].wait_slot(m.job(job).challenge_deadline)
     m.settle(w["admin"], job)
     assert m.job(job).state == "Settled"
+
+
+def test_unstake_waits_for_the_cooldown_and_the_open_jobs(world):
+    w, m, c = world, world["m"], world["c"]
+    job = _open(w, c)
+    with pytest.raises(ChainError, match="StakeLocked"):                # no unstake requested
+        m.unstake(c)
+    m.request_unstake(c)
+    with pytest.raises(ChainError, match="ProviderNotStaked"):          # leaving: no new jobs
+        _open(w, c)
+    with pytest.raises(ChainError, match="StakeLocked"):                # the cooldown runs
+        m.unstake(c)
+    w["rpc"].wait_slot(m.provider(c.pubkey()).unlock_slot)
+    with pytest.raises(ChainError, match="StakeLocked"):                # a job is still open
+        m.unstake(c)
+    w["rpc"].wait_slot(m.job(job).reveal_deadline)
+    m.expire(w["renter"], job)
+    before = m.balance(c.pubkey())
+    m.unstake(c)
+    assert m.balance(c.pubkey()) - before == STAKE
+    assert m.provider(c.pubkey()).stake == 0
