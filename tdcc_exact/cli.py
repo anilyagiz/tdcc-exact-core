@@ -128,7 +128,7 @@ def cmd_dispute(a) -> int:
             print(f"{rec.provider}: the trace does not match the posted trace root "
                   f"{rec.trace_root}: the provider loses the dispute")
             return 1
-    _, d, f = dispute(job, cps, model, trace.get("every", EVERY),
+    _, d, _ = dispute(job, cps, model, trace.get("every", EVERY),
                       _cheat(a.replay_skip_layer, model))
     return 0 if d is None else 1
 
@@ -186,9 +186,11 @@ def cmd_demo(a) -> int:
         for to, amt, why in v["transfers"]:
             say(f"   {k} {v['outcome']}: {to:9s} {amt / 1e6:+9.2f} USDC  {why}")
     if a.out:
-        json.dump({"job": job.__dict__, "receipts": [ra.receipt.__dict__, rb.receipt.__dict__],
-                   "divergence": d.__dict__ if d else None, "fault": f.__dict__ if f else None,
-                   "settlement": s}, open(a.out, "w"), indent=1)
+        run = {"job": job.__dict__, "receipts": [ra.receipt.__dict__, rb.receipt.__dict__],
+               "divergence": d.__dict__ if d else None, "fault": f.__dict__ if f else None,
+               "settlement": s}
+        with open(a.out, "w") as out:
+            json.dump(run, out, indent=1)
         say("   written to", a.out)
     return 0 if f is not None and ra.receipt.fingerprint == rv.receipt.fingerprint else 1
 
