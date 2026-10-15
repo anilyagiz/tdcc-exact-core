@@ -222,7 +222,8 @@ def test_a_provider_running_other_weights_is_caught(setup):
     """A smaller or cheaper model in place of the job's: same shape, other weights."""
     from tdcc_exact import registry
     job, _, a = setup
-    other = run_job(job, "B", every=EVERY, model=tiny_model(1), binding=BIND)
+    other = run_job(job, "B", every=EVERY, model=tiny_model(1), binding=BIND,
+                    check_registry=False)                # (a cheater skips the check)
     assert other.receipt.model_hash != a.receipt.model_hash
     assert registry.check(job, other.receipt.model_hash) is not None
     assert other.receipt.fingerprint != a.receipt.fingerprint
@@ -673,3 +674,15 @@ def test_the_checkpoint_interval_is_part_of_the_job(setup, tmp_path, capsys):
     (tmp_path / "a.trace.json").write_text(json.dumps(t))
     assert main(["dispute", *base, "--trace", str(tmp_path / "a.trace.json")]) == 1
     assert "every" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ the build is the registered one
+def test_a_build_the_environment_changed_is_refused(setup, monkeypatch):
+    """OTPU_FORMATS makes another image than the job's int8 one: run_job refuses before
+    running, for providers and verifiers alike."""
+    job, model, _ = setup
+    with pytest.raises(ValueError, match="registered"):
+        run_job(job, "A", model=tiny_model(1), binding=BIND)      # other weights
+    monkeypatch.setenv("OTPU_FORMATS", "mlp=fp4")
+    with pytest.raises(ValueError, match="OTPU_FORMATS"):
+        run_job(job, "A", model=model, binding=BIND)

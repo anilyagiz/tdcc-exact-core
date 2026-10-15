@@ -254,6 +254,19 @@ def as_binding(binding) -> bytes:
     return b
 
 
+def check_build(job: Job, model_hash: str) -> None:
+    """Raise if the job's model is registered and this build's image hash is not the pinned
+    one: the job says int8, but the environment (OTPU_FORMATS, OTPU_MLP_UNROLL_BODIES, other
+    OTPU_* settings) or the weights built another image, whose run no one else would match.
+    Providers and verifiers alike check before spending a run."""
+    from . import registry
+    why = registry.check(job, model_hash)
+    if why is not None and "not registered" not in why:
+        raise ValueError(f"{why}: this build of {model_name(job.model)} ({job.wformat}, cap "
+                         f"{job.cap}) is not the registered one; are OTPU_FORMATS, "
+                         "OTPU_MLP_UNROLL_BODIES or other OTPU_* environment variables set?")
+
+
 def job_every(job: Job, every: int | None) -> int:
     """The job's checkpoint interval; `every`, if given, must be it (a trace at another
     interval has other checkpoints, so it could never match the job's)."""
@@ -265,13 +278,14 @@ def job_every(job: Job, every: int | None) -> int:
 
 def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
             every: int | None = None, window=None, model=None, binding=None,
-            reveal: int | None = None) -> Run:
+            reveal: int | None = None, check_registry: bool = True) -> Run:
     """Run `job` on a traced Exact Core simulator (cheat: a dishonest provider's shortcut;
     every: None, or the job's own checkpoint interval (another is an error); window:
     (lo, hi], record each step there for a dispute; reveal: a checkpoint index, record
     every event up to it in log.events, for dispute.verify_window; binding: the
     on-chain job account's 32-byte address, the trace's first input; None: UNBOUND, for
-    local tries only)."""
+    local tries only; check_registry: refuse a build whose image hash is not the registered
+    one, before running anything; tests of other weights turn it off)."""
     from opentpu.llm.qwen3 import Engine    # (every Spec's engine: Qwen3, LFM2, ...)
     job.check_nonce()
     every = job_every(job, every)
@@ -281,6 +295,8 @@ def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
     log = TraceLog(every=every, window=window, binding=bind, reveal=reveal)
     eng = Engine(spec, W, cap=job.cap, backend=factory(log, cheat), wformat=job.wformat,
                  rows=job.chunk, pipeline=False)
+    if check_registry:
+        check_build(job, eng.backend.model_hash.hex())
     logits = eng.prefill([int(t) for t in job.prompt_ids], chunk=job.chunk)
     log.finish(eng.backend.machine.slices)  # (after the logits were read back)
     logits = np.asarray(logits, np.float32).reshape(-1)
