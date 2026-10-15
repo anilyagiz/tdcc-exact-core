@@ -5,7 +5,8 @@ Every instruction the simulator steps extends a hash chain:
     chain[i] = H(chain[i-1] || slice || pc || the instruction's 8 words || R0..R15 after it)
 
 and every `every` steps, and at the end of each device run, the log takes a checkpoint: a
-hash of each slice's working state (TMEM, ACT RAM and its scales, the registers, the pc) is
+hash of each slice's working state (TMEM, ACT RAM and its scales, the registers, the pc, and
+a running hash of the DRAM words and bytes its stores wrote) is
 folded into the chain (chain = H(chain || "C" || state)), and the checkpoint keeps the step
 count, that chain and the state hash. A checkpoint's leaf is H(step || chain || state).
 
@@ -61,11 +62,13 @@ def chain_start(binding: bytes) -> bytes:
 
 
 def state_hash(s) -> bytes:
-    """One slice's working state: TMEM, ACT RAM and its scales, the registers and the pc
-    (DRAM is not hashed: what a run stores there it stores from TMEM, and what it loads
-    back lands in TMEM, so a wrong value shows up here first)."""
+    """One slice's working state: TMEM, ACT RAM and its scales, the registers and the pc,
+    and the running hash of what it stored to DRAM (`stores`, kept by the traced slice:
+    the addresses and contents each ST / QST / DSTEP / STREAM wrote). The whole DRAM is not
+    hashed (the weights would dominate; the model hash pins them)."""
     regs = np.asarray([s.pc & 0xFFFFFFFF] + [r & 0xFFFFFFFF for r in s.R], np.uint32)
-    return h(s.tmem.tobytes(), s.act.tobytes(), s.ascale.tobytes(), regs.tobytes())
+    return h(s.tmem.tobytes(), s.act.tobytes(), s.ascale.tobytes(), regs.tobytes(),
+             getattr(s, "stores", b""))
 
 
 def merkle_root(leaves: list[bytes]) -> bytes:

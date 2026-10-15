@@ -523,3 +523,45 @@ def test_a_receipt_whose_root_is_not_its_trace_loses(setup):
     _, d, f = dispute(job, a.log.checkpoints, model, EVERY, out=lambda m: None,
                       receipt=forged, binding=BIND)
     assert d is None and f is not None and f.what == "output" and "trace root" in f.other
+
+
+# ------------------------------------------------------------------ DRAM stores in the trace
+class SkipStore:
+    """A provider that leaves out one store (slice 0's n-th ST; None: count them): the
+    stale DRAM it leaves is only in what the slice stored, not in TMEM or the registers."""
+    ops = frozenset({I.ST})
+    skipped = 0
+
+    def __init__(self, n=None):
+        self.n, self.count = n, 0
+
+    def start(self):
+        pass
+
+    def end(self):
+        pass
+
+    def skip(self, s, ins):
+        if s.sid:
+            return False
+        self.count += 1
+        if self.count == self.n:
+            self.skipped += 1
+            return True
+        return False
+
+
+def test_a_skipped_final_store_is_named_by_the_dispute(setup):
+    from tdcc_exact.cli import dispute
+    job, model, a = setup
+    count = SkipStore()
+    run_job(job, "B", count, every=EVERY, model=model, binding=BIND)
+    last = count.count
+    b = run_job(job, "B", SkipStore(last), every=EVERY, model=model, binding=BIND)
+    assert b.receipt.extra["skipped_mms"] == 1
+    assert b.receipt.trace_root != a.receipt.trace_root
+    _, d, f = dispute(job, b.log.checkpoints, model, EVERY, SkipStore(last),
+                      out=lambda m: None, binding=BIND)
+    assert d is not None and d.lo < d.hi            # a step, not only the reads after them
+    assert f is not None and f.what == "state" and f.slice == 0
+    assert f.honest.startswith(I.OPNAMES[I.ST])

@@ -21,14 +21,68 @@ def image_hash(images) -> bytes:
     return h(*[h(bytes(memoryview(img))) for img in images])
 
 
+STORES = frozenset({I.ST, I.QST, I.DSTEP, I.STREAM})     # the instructions that write DRAM
+
+
+class _TracedSlice(Slice):
+    """A slice that keeps a running hash of what it stores to DRAM (`stores`, part of its
+    state_hash): each ST / QST / DSTEP / STREAM folds in the DRAM words it addressed (by
+    _widx; QST's data bytes by their addresses) and their contents after it ran. Only what
+    the instruction touched is hashed, never the whole DRAM, so the cost is the
+    instruction's own. (Indices a STREAM or DSTEP only read are hashed too: harmless.)"""
+    stores = b""
+    _touched = None
+
+    def _widx(self, byte_addr):
+        idx = super()._widx(byte_addr)
+        if self._touched is not None:
+            self._touched.append(idx)
+        return idx
+
+    def execute(self, ins: I.Instr) -> None:
+        if ins.op not in STORES:
+            return super().execute(ins)
+        self._touched = []
+        try:
+            super().execute(ins)
+            words = [np.unique(i.reshape(-1)) for i in self._touched]
+            qbytes = None
+            if ins.op == I.QST:
+                qbytes = _qst_bytes(self, ins)
+        finally:
+            self._touched = None
+        parts = [bytes([ins.op])]
+        m32 = self.m32
+        for w in words:
+            parts += [h(w.astype("<i8").tobytes()), h(m32[w].astype("<u4").tobytes())]
+        if qbytes is not None:
+            parts += [h(qbytes.astype("<i8").tobytes()), h(self.dram[qbytes].tobytes())]
+        self.stores = h(self.stores, *parts)
+
+
+def _qst_bytes(s, ins) -> np.ndarray:
+    """The DRAM bytes a QST wrote its data to (isasim.Slice._qst's baddr)."""
+    w = ins.w
+    dst = (s.reg(ins.rb) + w[1]) & 0xFFFFFFFF
+    rows, KB = w[3] & 0xFFFF, w[3] >> 16
+    drs, es = w[5], w[6]
+    ne = KB * s.cfg.D // 2 if ins.flags & I.F_HALF else KB * s.cfg.D
+    b = dst + np.arange(rows)[:, None] * drs + np.arange(ne)[None, :] * es
+    return np.unique(b.reshape(-1))
+
+
 class TracedBackend(IsaBackend):
-    """IsaBackend with every step, host write, host read and run start in `log`."""
+    """IsaBackend with every step, host write, host read and run start in `log`, and slices
+    that hash what they store (_TracedSlice)."""
+    slice_class = _TracedSlice
 
     def __init__(self, cfg, images, log: TraceLog):
         self.model_hash = image_hash(images)
         super().__init__(cfg, images)
         self.log = log
         m = self.machine
+        for s in m.slices:
+            s.__class__ = self.slice_class
         m.observer = lambda s, pc: log.observe(s, pc, m.slices)
 
     def write(self, s, addr, data) -> None:
@@ -48,12 +102,13 @@ class TracedBackend(IsaBackend):
         return out
 
 
-class _SkippingSlice(Slice):
-    """A slice that does not execute the matrix multiplies `skip` picks (cheat.skip)."""
+class _SkippingSlice(_TracedSlice):
+    """A slice that does not execute the instructions `skip` picks (cheat.skip, asked about
+    the opcodes in cheat.ops: SkipLayer's matrix multiplies)."""
     cheat = None
 
     def execute(self, ins: I.Instr) -> None:
-        if ins.op == I.MM and self.cheat.skip(self, ins):
+        if ins.op in self.cheat.ops and self.cheat.skip(self, ins):
             return
         super().execute(ins)
 
@@ -84,6 +139,8 @@ class SkipLayer:
     Instead the layers are counted as they run: per slice and run, a mixer's MM that follows
     an MLP's (or is the run's first) starts the next layer. The parts are told apart by the
     compiler's source frames (Instr.src, layer_part)."""
+
+    ops = frozenset({I.MM})
 
     def __init__(self, layer: int, layers: int):
         if not 0 <= layer < layers:
@@ -121,10 +178,9 @@ class CheatingBackend(TracedBackend):
     log is honest about what it did, so it will not match an honest run)."""
 
     def __init__(self, cfg, images, log: TraceLog, cheat: SkipLayer):
+        self.slice_class = type("CheatSlice", (_SkippingSlice,), {"cheat": cheat})
         super().__init__(cfg, images, log)
         self.cheat = cheat
-        for s in self.machine.slices:
-            s.__class__ = type("CheatSlice", (_SkippingSlice,), {"cheat": cheat})
 
     def run(self, programs, args=None) -> dict:
         self.cheat.start()
