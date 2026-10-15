@@ -32,11 +32,17 @@ def matches_root(checkpoints: list[Checkpoint], root: bytes) -> bool:
 
 
 def bisect(a: list[Checkpoint], b: list[Checkpoint]) -> Divergence | None:
-    """The first checkpoint where a and b differ (None: the traces are the same)."""
+    """A checkpoint where a and b differ while the one before agrees (None: the traces are
+    the same). Honest chains are cumulative, so that is the first difference; a posted list
+    need not be, so the search starts from the last difference, not from the last leaf."""
     n = min(len(a), len(b))
-    if n == len(a) == len(b) and (n == 0 or a[-1].leaf == b[-1].leaf):
+    if len(a) != len(b):
+        hi = n                          # past the shorter list: a difference
+    else:
+        hi = next((i for i in range(n - 1, -1, -1) if a[i].leaf != b[i].leaf), None)
+    if hi is None:
         return None
-    lo, hi, rounds = 0, n, 0            # first differing index in [lo, hi]
+    lo, rounds = 0, 0                   # a[hi] differs; find lo with a[lo] differing, a[lo-1] not
     while lo < hi:
         mid = (lo + hi) // 2
         rounds += 1

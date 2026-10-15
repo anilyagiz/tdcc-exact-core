@@ -8,7 +8,7 @@ from tdcc_exact.backend import SkipLayer
 from tdcc_exact.dispute import bisect, first_fault, matches_root
 from tdcc_exact.oracle import layers_of, new_job, run_job, tiny_model
 from tdcc_exact.settle import accept, slash
-from tdcc_exact.trace import StepRecord, merkle_proof, merkle_root, merkle_verify
+from tdcc_exact.trace import Checkpoint, StepRecord, merkle_proof, merkle_root, merkle_verify
 
 EVERY = 512
 
@@ -68,6 +68,27 @@ def test_a_job_no_run_can_answer_is_refused_before_running(setup, change):
 def test_bisect_agrees_on_equal_traces(setup):
     _, _, a = setup
     assert bisect(a.log.checkpoints, list(a.log.checkpoints)) is None
+
+
+def _cps(n, bad=()):
+    return [Checkpoint(10 * i, (b"x" if i in bad else bytes([i])) * 32, b"s" * 32)
+            for i in range(1, n + 1)]
+
+
+@pytest.mark.parametrize("other, index", [
+    (_cps(3), 3),                   # the provider stopped early
+    (_cps(7), 5),                   # or posted more checkpoints than there were
+    ([], 0),                        # or none
+    (_cps(5, bad={2}), 1),          # one checkpoint in the middle, the last one copied
+    (_cps(5, bad={2, 4}), 1),
+    (_cps(5, bad={5}), 4),
+])
+def test_bisect_lands_where_the_one_before_agrees(other, index):
+    mine = _cps(5)
+    d = bisect(mine, other)
+    assert d is not None and d.index == index
+    assert index == 0 or mine[index - 1].leaf == other[index - 1].leaf
+    assert index >= min(len(mine), len(other)) or mine[index].leaf != other[index].leaf
 
 
 def _rec(i):
