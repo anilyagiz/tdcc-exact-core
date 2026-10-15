@@ -107,3 +107,142 @@ def test_a_tampered_trace_is_rejected(tmp_path, trace):
 def test_open_store(tmp_path):
     assert isinstance(open_store(str(tmp_path)), DirStore)
     assert isinstance(open_store("http://127.0.0.1:1"), HttpStore)
+
+
+# ------------------------------------------------------------------------------- the nodes
+# against a stand-in for the chain that enforces the program's rules for these three calls
+class FakeChain:
+    def __init__(self):
+        self.now, self.jobs_, self.sent = 100, {}, []
+        self.rpc = self
+
+    def wait_slot(self, s):
+        self.now = max(self.now, s + 1)
+
+    def slot(self):
+        return self.now
+
+    def open(self, key, provider, job_digest, model_hash, window=10):
+        from types import SimpleNamespace
+        self.jobs_[key] = SimpleNamespace(
+            provider=provider, job_digest=job_digest, model_hash=model_hash, state="Open",
+            opened_slot=self.now, commit_deadline=self.now + window,
+            reveal_deadline=self.now + 2 * window, challenge_deadline=0,
+            commitment=bytes(32), fingerprint=bytes(32), trace_root=bytes(32))
+
+    def jobs(self, provider=None, states=None):
+        return [(k, j) for k, j in sorted(self.jobs_.items(), key=lambda x: str(x[0]))
+                if (provider is None or j.provider == provider)
+                and (states is None or j.state in states)]
+
+    def commit(self, owner, key, c):
+        j = self.jobs_[key]
+        assert j.state == "Open" and self.now <= j.commit_deadline
+        j.commitment, j.state = c, "Committed"
+        self.sent.append(("commit", key))
+        return f"sig-commit-{len(self.sent)}"
+
+    def reveal(self, owner, key, fp, salt, model_hash, root, cps):
+        from tdcc_exact.commit import commitment
+        j = self.jobs_[key]
+        assert j.state == "Committed" and j.commit_deadline < self.now <= j.reveal_deadline
+        assert commitment(fp, bytes(owner.pubkey()), salt) == j.commitment
+        assert model_hash == j.model_hash
+        j.fingerprint, j.trace_root, j.state = fp, root, "Revealed"
+        j.challenge_deadline = self.now + 10
+        self.sent.append(("reveal", key))
+        return f"sig-reveal-{len(self.sent)}"
+
+    def challenge(self, verifier, key, fp):
+        j = self.jobs_[key]
+        assert j.state == "Revealed" and self.now <= j.challenge_deadline
+        assert fp != j.fingerprint
+        j.state = "Challenged"
+        self.sent.append(("challenge", key))
+        return f"sig-challenge-{len(self.sent)}"
+
+
+class Key(bytes):
+    """A job account's key in the fake chain (str() names it, bytes() is 32 bytes)."""
+
+    def __new__(cls, name):
+        return super().__new__(cls, name.encode().ljust(32, b"\0"))
+
+    def __str__(self):
+        return self.rstrip(b"\0").decode()
+
+
+@pytest.fixture
+def fake(tmp_path):
+    pytest.importorskip("solders")
+    from solders.keypair import Keypair
+
+    from tdcc_exact import registry
+    from tdcc_exact.node.common import Models
+    return dict(chain=FakeChain(), store=DirStore(tmp_path / "store"), dir=tmp_path,
+                provider=Keypair(), verifier=Keypair(), models=Models(),
+                model_hash=bytes.fromhex(registry.expected("tiny", "int8", 256)))
+
+
+def _provider(f, name="p", **kw):
+    from tdcc_exact.node.provider import ProviderNode
+    return ProviderNode(f["chain"], f["provider"], f["store"], f["dir"] / name / "state.json",
+                        f["models"], every=EVERY, log=lambda *a: None, **kw)
+
+
+J1 = Key("J1")
+
+
+def test_provider_commits_reveals_publishes_once(fake, job):
+    f, c = fake, fake["chain"]
+    f["store"].put_job(job)
+    c.open(J1, f["provider"].pubkey(), job.digest, f["model_hash"])
+    assert _provider(f).run_once() == {"J1": "committed"}
+    # a restarted node (same state file) neither commits again nor reveals early
+    assert _provider(f).run_once() == {}
+    assert _provider(f).run_once(wait=True) == {"J1": "published"}
+    assert [s for s, _ in c.sent] == ["commit", "reveal"]
+    j = c.jobs_[J1]
+    assert f["store"].get_trace(j.trace_root)["root"] == j.trace_root.hex()
+    assert _provider(f).run_once(wait=True) == {}
+
+
+def test_provider_restart_after_an_unrecorded_commit_reveals(fake, job):
+    f, c = fake, fake["chain"]
+    f["store"].put_job(job)
+    c.open(J1, f["provider"].pubkey(), job.digest, f["model_hash"])
+    p = _provider(f)
+    p.run_once()
+    p.state.set("J1", status="prepared")       # as if the node died before recording it
+    assert _provider(f).run_once(wait=True) == {"J1": "published"}
+    assert [s for s, _ in c.sent] == ["commit", "reveal"]
+
+
+def test_provider_refuses_a_job_that_is_not_the_on_chain_one(fake, job, tmp_path):
+    f, c = fake, fake["chain"]
+    other = new_job("tiny", "Will it snow tomorrow?")
+    f["store"].put_job(job)
+    c.open(J1, f["provider"].pubkey(), other.digest, f["model_hash"])
+    # the renter's file under the on-chain digest is another job: the store's check refuses it
+    (tmp_path / "store" / "jobs" / f"{other.digest.hex()}.json").write_bytes(job_json(job))
+    p = _provider(f)
+    assert p.run_once(wait=True) == {"J1": "refused"}
+    assert "digest" in p.state.get("J1")["why"] and c.sent == []
+
+
+def test_provider_refuses_an_unregistered_model_hash(fake, job):
+    f, c = fake, fake["chain"]
+    f["store"].put_job(job)
+    c.open(J1, f["provider"].pubkey(), job.digest, bytes([9]) * 32)
+    p = _provider(f)
+    assert p.run_once(wait=True) == {"J1": "refused"}
+    assert "registered" in p.state.get("J1")["why"] and c.sent == []
+
+
+def test_provider_waits_for_an_unpublished_job_then_misses_it(fake, job):
+    f, c = fake, fake["chain"]
+    c.open(J1, f["provider"].pubkey(), job.digest, f["model_hash"])
+    assert _provider(f).run_once() == {}
+    c.now += 100
+    assert _provider(f).run_once() == {"J1": "missed"}
+    assert c.sent == []
