@@ -701,3 +701,20 @@ def test_job_fields_are_typed(setup):
                 {"prompt_ids": "abc"}, {"cap": "256"}, {"model": 1}, {"nonce": None}):
         with pytest.raises(ValueError):
             dataclasses.replace(job, **bad)
+
+
+# ------------------------------------------------------------------ the registry's pins
+def test_the_tiny_pin_is_the_tiny_build():
+    """tdcc_exact/models.json pins the tiny model's image hash; the build must give it. The
+    tiny weights come from numpy's default_rng(0), whose stream numpy does not promise to
+    keep across versions: a numpy (or image layout) change shows up here first, and then
+    every tiny fingerprint changes too (re-pin with `tdcc-exact registry add --model tiny`)."""
+    from tdcc_exact import registry
+    from tdcc_exact.oracle import build_hash
+    assert build_hash("tiny") == registry.expected("tiny", "int8", 256)
+
+
+def test_hashes_assume_little_endian():
+    import sys
+    from tdcc_exact.trace import state_hash  # noqa: F401  (the import checks the byte order)
+    assert sys.byteorder == "little"

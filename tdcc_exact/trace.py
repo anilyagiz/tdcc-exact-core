@@ -34,9 +34,17 @@ instruction whose result differs (tdcc_exact/dispute.py).
 from __future__ import annotations
 
 import hashlib
+import sys
 from dataclasses import dataclass, field
 
 import numpy as np
+
+# The hashes take numpy arrays' bytes as they are in memory (TMEM, the ACT RAM, the
+# registers, the logits), so every party must lay them out alike: little-endian, as the
+# card, x86 and ARM machines do. A big-endian machine would post other hashes for honest
+# work, so it refuses to start instead.
+if sys.byteorder != "little":
+    raise ImportError("tdcc_exact hashes little-endian memory; this machine is big-endian")
 
 
 DIGEST = 32                      # bytes per hash (SHA-256: Solana's sol_sha256 syscall, so the
