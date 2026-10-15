@@ -12,6 +12,7 @@
 //!                                                               │           to the verifier, the
 //!                                                               │           rest to TDCC)
 //!                                                               └──► dismiss ──► settle
+//!                                                                    (one challenge per job)
 //! ```
 //!
 //! A provider that commits but never reveals (or never commits) lets the renter take the
@@ -275,6 +276,8 @@ pub mod tdcc_exact {
             ExactError::WindowClosed
         );
         require!(fingerprint != j.fingerprint, ExactError::SameFingerprint);
+        // one challenge per job: once the arbiter dismissed one, the receipt stands
+        require!(j.verifier == Pubkey::default(), ExactError::AlreadyChallenged);
         j.verifier = ctx.accounts.verifier.key();
         j.verifier_fingerprint = fingerprint;
         j.state = JobState::Challenged;
@@ -801,6 +804,8 @@ pub enum ExactError {
     SameFingerprint,
     #[msg("this signer may not act on this job")]
     NotYourJob,
+    #[msg("the job was challenged already, and the challenge dismissed")]
+    AlreadyChallenged,
 }
 
 #[cfg(test)]

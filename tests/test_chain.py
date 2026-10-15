@@ -190,3 +190,18 @@ def test_unstake_waits_for_the_cooldown_and_the_open_jobs(world):
     m.unstake(c)
     assert m.balance(c.pubkey()) - before == STAKE
     assert m.provider(c.pubkey()).stake == 0
+
+
+def test_a_dismissed_challenge_cannot_be_raised_again(world):
+    """dismiss and a new challenge in one transaction (so in one slot, where the challenge
+    window is still open): the arbiter's ruling stands, the job settles."""
+    from tdcc_exact.chain import R, S, W, b32
+    w, m = world, world["m"]
+    job = _open(w, w["a"])
+    _post(w, w["a"], job, b"\x0b" * 32)
+    m.challenge(w["verifier"], job, b"\x0c" * 32)
+    again = [m._ix("dismiss", [S(w["admin"].pubkey()), R(m.config), W(job)]),
+             m._ix("challenge", [S(w["verifier"].pubkey()), W(job)], b32(b"\x0d" * 32))]
+    with pytest.raises(ChainError, match="AlreadyChallenged"):
+        w["rpc"].send(again, w["admin"], w["verifier"])
+    assert m.job(job).state == "Challenged"            # the transaction rolled back whole
