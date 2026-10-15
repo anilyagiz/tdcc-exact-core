@@ -53,3 +53,27 @@ include = ["opentpu*", "tdcc_exact*"]
 [tool.setuptools.package-data]
 tdcc_exact = ["models.json", "py.typed"]
 opentpu = ["lens_app.html", "host/setup_pcie.sh", "host/pcie/*", "host/litedram/*"]
+
+# Lint for TDCC Exact's own Python only (upstream openTPU code is not linted here): the rule set
+# is the one the current code passes. Left out for now: I (import order: chain.py, cli.py,
+# oracle.py, trace.py, test_exact.py), E741 (`l` in chain.py), and B905/B008/B007 (zip without
+# strict=, Params() as a default in chain.py, an unused loop variable in chain_demo.py).
+# Not linted yet: tools/oracle_eval.py (B023, a closure over the loop variable `fmt`).
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+include = [
+    "tdcc_exact/**/*.py",
+    "tools/record_demo.py",
+    "tests/test_exact.py",
+    "tests/test_chain.py",
+    "tests/test_api.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E741", "B905", "B008", "B007"]
+
+[tool.ruff.lint.per-file-ignores]
+# the recorded demo's script: each line is one README command, kept whole
+"tools/record_demo.py" = ["E501"]

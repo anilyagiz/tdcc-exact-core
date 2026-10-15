@@ -8,6 +8,17 @@ permissions:
   contents: read      # CI only reads the code; a public repo's runs get no write token
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      # the files and rules are in pyproject.toml's [tool.ruff]
+      - run: ruff check
+
   python:
     runs-on: ubuntu-latest
     steps:
