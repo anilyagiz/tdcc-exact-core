@@ -1,0 +1,40 @@
+name: Bug report
+description: Something in tdcc-exact or the Solana program does not do what the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security problem (a way to lose funds, or to get a wrong verdict) is not an issue:
+        please report it privately, as SECURITY.md describes.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - the verification layer (trace, receipts, dispute, settlement)
+        - the tdcc-exact command
+        - the Solana program or its client
+        - the accelerator (opentpu/, rtl/, sim/; often belongs upstream)
+        - docs
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The commands you ran and their output.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python version, the commit; for the program, the cluster and the Solana CLI version

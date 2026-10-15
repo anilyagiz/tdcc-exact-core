@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/anilyagiz/tdcc-exact-core/security/advisories/new
+    about: Privately, please (SECURITY.md)
+  - name: The accelerator itself (openTPU)
+    url: https://github.com/FeSens/openTPU/issues
+    about: Bugs in opentpu/, rtl/ or sim/ that are not about verification
