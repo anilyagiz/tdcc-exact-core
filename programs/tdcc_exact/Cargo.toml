@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "TDCC Exact: escrow, provider stakes, commit-reveal receipts, challenge, settle and slash"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/anilyagiz/tdcc-exact-core"
+keywords = ["solana", "anchor", "escrow", "fraud-proof"]
+publish = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
