@@ -3,7 +3,8 @@
     tdcc-exact job new --model tiny --question "Did it rain?" --out job.json
     tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json
     tdcc-exact verify --job job.json --receipt a.json
-    tdcc-exact dispute --job job.json --trace b.trace.json [--replay-skip-layer K]
+    tdcc-exact dispute --job job.json --trace b.trace.json [--receipt b.json]
+                       [--replay-skip-layer K]
     tdcc-exact demo [--model models/LFM2.5-230M] [--devnet | --localnet]
     tdcc-exact registry add --model tiny [--wformat int8 --cap 256]
 """
@@ -17,7 +18,7 @@ import time
 from . import registry
 from .backend import SkipLayer
 from .commit import check_reveal, commitment, new_salt
-from .dispute import bisect, first_fault
+from .dispute import bisect, first_fault, matches_root
 from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
                      model_name, new_job, run_job, save_trace)
 from .settle import accept, slash
@@ -108,7 +109,14 @@ def cmd_dispute(a) -> int:
     job = Job.load(a.job)
     model = load_model(job.model)
     trace = load_trace(a.trace)
-    _, d, f = dispute(job, _checkpoints(trace), model, trace.get("every", EVERY),
+    cps = _checkpoints(trace)
+    if a.receipt:
+        rec = Receipt.load(a.receipt)
+        if not matches_root(cps, bytes.fromhex(rec.trace_root)):
+            print(f"{rec.provider}: the trace does not match the posted trace root "
+                  f"{rec.trace_root}: the provider loses the dispute")
+            return 1
+    _, d, f = dispute(job, cps, model, trace.get("every", EVERY),
                       _cheat(a.replay_skip_layer, model))
     return 0 if d is None else 1
 
@@ -205,6 +213,7 @@ def main(argv=None) -> int:
     d = sub.add_parser("dispute", help="find the first instruction a provider's trace got wrong")
     d.add_argument("--job", required=True)
     d.add_argument("--trace", required=True, help="the provider's trace")
+    d.add_argument("--receipt", help="the provider's receipt: its trace root must match")
     d.add_argument("--replay-skip-layer", type=int,
                    help="replay the provider's window with this shortcut (local demo)")
     d.set_defaults(fn=cmd_dispute)

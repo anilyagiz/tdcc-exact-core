@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .trace import Checkpoint
+from .trace import Checkpoint, merkle_root
 
 
 @dataclass
@@ -23,6 +23,12 @@ class Divergence:
     lo: int                      # its window: steps (lo, hi]
     hi: int
     rounds: int                  # binary-search rounds it took
+
+
+def matches_root(checkpoints: list[Checkpoint], root: bytes) -> bool:
+    """Whether a checkpoint list is the one a receipt committed to: a provider must play the
+    bisection on the trace it posted, not on one made up after the challenge."""
+    return merkle_root([c.leaf for c in checkpoints]) == root
 
 
 def bisect(a: list[Checkpoint], b: list[Checkpoint]) -> Divergence | None:

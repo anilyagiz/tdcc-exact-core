@@ -94,7 +94,7 @@ tdcc-exact run --job job.json --provider A --out a.json --trace a.trace.json
 tdcc-exact run --job job.json --provider B --skip-layer 1 --out b.json --trace b.trace.json
 tdcc-exact verify --job job.json --receipt a.json      # ACCEPT, exit 0
 tdcc-exact verify --job job.json --receipt b.json      # CHALLENGE, exit 1
-tdcc-exact dispute --job job.json --trace b.trace.json --replay-skip-layer 1
+tdcc-exact dispute --job job.json --trace b.trace.json --receipt b.json --replay-skip-layer 1
 ```
 
 ### On Solana

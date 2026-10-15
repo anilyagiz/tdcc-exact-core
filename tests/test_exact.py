@@ -5,7 +5,7 @@ import pytest
 
 from opentpu import isa as I
 from tdcc_exact.backend import SkipLayer
-from tdcc_exact.dispute import bisect, first_fault
+from tdcc_exact.dispute import bisect, first_fault, matches_root
 from tdcc_exact.oracle import layers_of, new_job, run_job, tiny_model
 from tdcc_exact.settle import accept, slash
 from tdcc_exact.trace import StepRecord, merkle_root
@@ -71,6 +71,15 @@ def test_first_fault_names_the_step_only_one_side_ran():
     f = first_fault(three, two)              # the other run stopped one step early
     assert (f.step, f.honest, f.other) == (3, "I3", "(ended)")
     assert first_fault(two, list(two)) is None
+
+
+def test_a_trace_must_match_its_posted_root(setup):
+    _, _, a = setup
+    cps, root = a.log.checkpoints, bytes.fromhex(a.receipt.trace_root)
+    assert matches_root(cps, root)
+    assert not matches_root(cps[:-1], root)                 # a checkpoint dropped
+    assert not matches_root(cps + cps[-1:], root)           # the last one repeated
+    assert not matches_root(list(reversed(cps)), root)
 
 
 def test_merkle_root_commits_to_order():
