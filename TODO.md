@@ -1,8 +1,7 @@
 # TDCC Exact: what is left
 
-What the hackathon deck promises, against what this repository does today. Priorities:
-**P0** the devnet demo in the deck, **P1** a market that holds up against real cheaters,
-**P2** hardware and mainnet (the deck's 30 / 60 / 90 days).
+What this repository does today, and what is left. Priorities: **P0** the devnet demo,
+**P1** a market that holds up against real cheaters, **P2** hardware and mainnet.
 
 Done: the trace log, oracle jobs, receipts, the bisection dispute and the settlement
 split, all on the bit-exact ISA simulator with a tiny random model (`tdcc-exact demo`,
@@ -10,7 +9,7 @@ split, all on the bit-exact ISA simulator with a tiny random model (`tdcc-exact 
 
 ---
 
-## P0: the demo in the deck (Solana devnet, LFM2.5-230M)
+## P0: the devnet demo (Solana devnet, LFM2.5-230M)
 
 ### 1. The Solana program (built, tested on a local validator, deployed to devnet)
 - [x] Anchor workspace in `programs/tdcc_exact/` (Rust); program id in the README.
@@ -71,12 +70,10 @@ on the simulator); numbers in docs/exact.md sections 5 and 6.
 - [x] **Job parameters the provider could change**: `wformat`, `cap`. They are in the job
       digest already; add a test that a provider who runs fp4 instead of int8 is caught.
 
-### 5. Deliverables for the submission
+### 5. Demo material
 - [x] Demo video: the step-by-step run, recorded (docs/media/tdcc-exact-demo.mp4,
       tools/record_demo.py).
 - [ ] A capture of `tdcc-exact demo --devnet` with its Explorer pages.
-- [x] The deck's "Code: [GitHub link]" ("Demo: [video link]" waits on the upload).
-- [ ] Repo visibility: it is private now; make it public for the judges.
 - [x] CI: GitHub Actions on Ubuntu (also builds the program and runs it on a local validator) running `python -m pytest -q tests/test_exact.py
       tests/test_isa.py tests/test_compiler.py` (the upstream suite needs Linux: `fcntl`).
 
@@ -135,7 +132,7 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
 
 ---
 
-## P2: hardware and mainnet (deck: 30 / 60 / 90 days)
+## P2: hardware and mainnet
 
 ### 10. The trace log on the card
 The card already runs these models bit-exact with the simulator (upstream openTPU measured
@@ -151,13 +148,12 @@ have to re-run the job on the simulator to produce a trace, which defeats the ca
 - [ ] Timing: the design closes 133.33 MHz with WNS +0.032 ns (README); a hash engine
       must not break timing. Run it through the Vivado tournament.
 - [ ] Get a Kintex-7 card (Inspur YPCB-00338), build with `make bit` in
-      `boards/ypcb-00338`, bring it up (docs/board.md), first token (deck: 30 days).
+      `boards/ypcb-00338`, bring it up (docs/board.md), first token.
 
-### 11. Mainnet (deck: 90 days)
+### 11. Mainnet
 - [ ] Program audit, upgrade authority on a multisig.
 - [ ] Mainnet USDC, real stakes, monitoring.
-- [ ] Exact cards in the TDCC network; "verified lane" offered to existing TDCC users
-      (deck: 60 days), 2-3 paid pilots.
+- [ ] Exact cards in the TDCC network: a "verified lane" for its jobs.
 
 ### 12. Housekeeping
 - [ ] Licenses: Apache-2.0 NOTICE is in place for openTPU. Check the LFM2.5 model license
