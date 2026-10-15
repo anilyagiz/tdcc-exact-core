@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read      # CI only reads the code; a public repo's runs get no write token
+
 jobs:
   python:
     runs-on: ubuntu-latest
