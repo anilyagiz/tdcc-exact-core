@@ -686,3 +686,18 @@ def test_a_build_the_environment_changed_is_refused(setup, monkeypatch):
     monkeypatch.setenv("OTPU_FORMATS", "mlp=fp4")
     with pytest.raises(ValueError, match="OTPU_FORMATS"):
         run_job(job, "A", model=model, binding=BIND)
+
+
+# ------------------------------------------------------------------ job field types
+def test_job_fields_are_typed(setup):
+    import dataclasses
+    import numpy as np
+    job, _, _ = setup
+    ids = np.asarray(job.prompt_ids, np.int64)
+    j = dataclasses.replace(job, prompt_ids=list(ids), yes_id=np.int32(job.yes_id))
+    assert type(j.prompt_ids[0]) is int and type(j.yes_id) is int
+    assert j.digest == job.digest                       # numpy ids: the same job
+    for bad in ({"yes_id": 3.0}, {"yes_id": True}, {"prompt_ids": [1, 2.5]},
+                {"prompt_ids": "abc"}, {"cap": "256"}, {"model": 1}, {"nonce": None}):
+        with pytest.raises(ValueError):
+            dataclasses.replace(job, **bad)

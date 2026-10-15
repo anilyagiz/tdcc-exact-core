@@ -50,6 +50,18 @@ class Job:
     every: int = EVERY           # steps between trace checkpoints: the trace's shape, so a
                                  # provider and a verifier must agree on it (in the digest)
 
+    def __post_init__(self):
+        """Integral fields become plain ints (an np.int64 id would not serialize; a 3.0 would
+        give another digest than 3), the rest must be strings: a job has one digest."""
+        for k in ("yes_id", "no_id", "cap", "chunk", "every"):
+            setattr(self, k, _int(getattr(self, k), k))
+        if isinstance(self.prompt_ids, (str, bytes)) or not hasattr(self.prompt_ids, "__iter__"):
+            raise ValueError(f"prompt_ids must be a list of token ids, not {self.prompt_ids!r}")
+        self.prompt_ids = [_int(t, "prompt_ids") for t in self.prompt_ids]
+        for k in ("model", "question", "wformat", "job_id", "nonce"):
+            if not isinstance(getattr(self, k), str):
+                raise ValueError(f"{k} must be a string, not {getattr(self, k)!r}")
+
     @property
     def digest(self) -> bytes:
         d = asdict(self)
@@ -95,6 +107,14 @@ class Job:
     @staticmethod
     def load(path) -> "Job":
         return _load(Job, path)
+
+
+def _int(v, what: str) -> int:
+    """An integral value (int, numpy integer) as int; bool, float and the rest refused."""
+    import numbers
+    if isinstance(v, (bool, np.bool_)) or not isinstance(v, numbers.Integral):
+        raise ValueError(f"{what}: {v!r} is not an integer")
+    return int(v)
 
 
 def is_tiny(model: str) -> bool:
