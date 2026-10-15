@@ -91,6 +91,9 @@ jobs:
   program:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # pinned: the version the program builds with and the chain tests pass on
+      AGAVE_VERSION: v4.3.0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -104,10 +107,12 @@ jobs:
             ~/.cargo/registry
             ~/.cache/solana
             target
-          key: program-${{ hashFiles('Cargo.lock') }}
-      - name: Solana CLI (Agave)
+          # the sources and the toolchain are in the key, so a stale target/ (and its .so)
+          # cannot outlive a change to either
+          key: program-${{ runner.os }}-${{ env.AGAVE_VERSION }}-${{ hashFiles('programs/**', 'Cargo.lock', 'Cargo.toml') }}
+      - name: Solana CLI (Agave ${{ env.AGAVE_VERSION }})
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/${AGAVE_VERSION}/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - name: program unit tests (settlement vectors, commitment)
         run: cargo test -p tdcc_exact
