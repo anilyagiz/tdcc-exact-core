@@ -317,7 +317,8 @@ def test_nodes_on_a_validator(tmp_path, job):
     for k in (admin, renter, verifier, a, b):
         rpc.airdrop(k.pubkey(), 2_000_000_000)
     m = Market(rpc, admin, "localnet")
-    m.initialize(treasury.pubkey(), Params(commit_window=20, challenge_window=40))
+    m.initialize(treasury.pubkey(), Params(commit_window=20, challenge_window=40,
+                                           unstake_cooldown=100))
     for p in (a, b):
         m.mint_to(p.pubkey(), 50_000_000)
         m.register_provider(p)

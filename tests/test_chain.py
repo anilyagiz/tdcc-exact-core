@@ -25,7 +25,7 @@ PRICE, STAKE = 2_000_001, 50_000_001          # odd: the rounding is the program
 BOND = 1_000_003
 # windows in slots (~0.4 s each): wide enough that a loaded runner still commits, reveals and
 # challenges inside them (4 slots flaked), short enough to keep the suite quick
-WORLD = Params(commit_window=10, challenge_window=8, arbiter_window=6, unstake_cooldown=4,
+WORLD = Params(commit_window=10, challenge_window=8, arbiter_window=6, unstake_cooldown=35,
                challenge_bond=BOND)
 MODEL = bytes([7]) * 32
 
@@ -489,3 +489,16 @@ def test_close_job_pays_only_the_renter(world):
         w["rpc"].send([steal], w["verifier"])
     m.close_job(job, w["renter"])
     assert w["rpc"].account(job) is None
+
+
+def test_the_unstake_cooldown_outlasts_a_job(world):
+    """A provider may not be able to leave before a pending challenge can be ruled: the
+    cooldown must exceed 2 commit windows + the challenge window + the arbiter window."""
+    import dataclasses
+    rpc, admin = world["rpc"], Keypair()
+    rpc.airdrop(admin.pubkey(), 2_000_000_000)
+    m = Market(rpc, admin, "localnet")
+    p = dataclasses.replace(WORLD, unstake_cooldown=WORLD.job_life)
+    with pytest.raises(ChainError, match="BadParams"):
+        m.initialize(Keypair().pubkey(), p)
+    m.initialize(Keypair().pubkey(), dataclasses.replace(p, unstake_cooldown=p.job_life + 1))

@@ -264,7 +264,7 @@ def test_validator_flow_is_indexed():
     since = head[0]["signature"] if head else None
     m = Market(rpc, admin, "localnet")
     m.initialize(treasury.pubkey(), Params(commit_window=10, challenge_window=6,
-                                           unstake_cooldown=4))
+                                           arbiter_window=4, unstake_cooldown=31))
     m.mint_to(prov.pubkey(), 20_000_000)
     m.register_provider(prov)
     m.stake(prov, 20_000_000)

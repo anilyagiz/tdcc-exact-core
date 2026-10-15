@@ -92,6 +92,19 @@ pub mod tdcc_exact {
         require!(params.challenge_bond > 0, ExactError::BadParams);
         require!(params.arbiter_window > 0, ExactError::BadParams);
         require!(params.arbiter != Pubkey::default(), ExactError::BadParams);
+        // A job's whole life, from open_job to the last moment the arbiter may still slash, is
+        // at most commit_window (commit) + commit_window (reveal) + challenge_window (the last
+        // challenge, a later one after a dismissal included) + arbiter_window (its ruling).
+        // request_unstake stops new jobs at once, so with a longer cooldown every job opened
+        // before the request is ruled before the stake can leave: the slash always finds the
+        // stake, even if the open_jobs counter were ever released early.
+        let life = params
+            .commit_window
+            .checked_mul(2)
+            .and_then(|x| x.checked_add(params.challenge_window))
+            .and_then(|x| x.checked_add(params.arbiter_window))
+            .ok_or(ExactError::Overflow)?;
+        require!(params.unstake_cooldown > life, ExactError::BadParams);
         let c = &mut ctx.accounts.config;
         c.admin = ctx.accounts.admin.key();
         c.arbiter = params.arbiter;

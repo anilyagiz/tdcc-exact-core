@@ -302,6 +302,12 @@ class Params:
     arbiter_window: int = 16         # slots the arbiter has to rule on a challenge
     arbiter: Pubkey | None = None    # who rules on challenges (None: the admin)
 
+    @property
+    def job_life(self) -> int:
+        """Slots from open_job to the last moment a challenge can be ruled; the program wants
+        unstake_cooldown > this, so no stake leaves before a pending ruling."""
+        return 2 * self.commit_window + self.challenge_window + self.arbiter_window
+
 
 class Market:
     """One market instance of the program, run by `admin`. `arbiter` signs slash and dismiss

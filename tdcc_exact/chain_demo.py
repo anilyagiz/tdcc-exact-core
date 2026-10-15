@@ -47,8 +47,9 @@ def run(a) -> int:
                 f"({e}).\n   Fund it at https://faucet.solana.com and run again.")
             return 2
     if not m.ready:
-        sig = m.initialize(keys["treasury"].pubkey(), Params(commit_window=a.commit_window,
-                                                             challenge_window=a.challenge_window))
+        p = Params(commit_window=a.commit_window, challenge_window=a.challenge_window)
+        p.unstake_cooldown = max(p.unstake_cooldown, p.job_life + 1)
+        sig = m.initialize(keys["treasury"].pubkey(), p)
         say(f"   created the market: test USDC mint {m.mint}\n   {link(sig)}")
     m.fund(*(k.pubkey() for k in (renter, pa, pb, verifier)))
     m.mint_to(renter.pubkey(), 2 * a.price)
