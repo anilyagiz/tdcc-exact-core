@@ -278,8 +278,8 @@ def cmd_demo(a) -> int:
 def cmd_registry(a) -> int:
     name = model_name(a.model)
     hh = build_hash(a.model, a.wformat, a.cap)
-    registry.add(name, a.wformat, a.cap, hh, a.source or a.model)
-    print(f"{registry.key(name, a.wformat, a.cap)} -> {hh}")
+    where = registry.add(name, a.wformat, a.cap, hh, a.source or a.model, a.path)
+    print(f"{registry.key(name, a.wformat, a.cap)} -> {hh}  ({where})")
     return 0
 
 
@@ -331,6 +331,9 @@ def main(argv=None) -> int:
     g.add_argument("--wformat", default="int8")
     g.add_argument("--cap", type=int, default=256)
     g.add_argument("--source", default="", help="where the checkpoint came from (revision)")
+    g.add_argument("--path", help="the registry file to pin in (default: the user registry, "
+                   "$TDCC_EXACT_REGISTRY or ~/.config/tdcc-exact/models.json; "
+                   "tdcc_exact/models.json for the packaged pins)")
     g.set_defaults(fn=cmd_registry)
 
     d = sub.add_parser("dispute", help="find the first instruction a provider's trace got wrong")

@@ -15,6 +15,20 @@ EVERY = 512
 BIND = provider_key("A")      # A's job (the CLI's default binding for provider A)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _no_user_registry(tmp_path_factory):
+    """The tests see the packaged pins only, not this machine's user registry."""
+    import os
+    from tdcc_exact import registry
+    old = os.environ.get(registry.ENV)
+    os.environ[registry.ENV] = str(tmp_path_factory.mktemp("reg") / "none.json")
+    yield
+    if old is None:
+        os.environ.pop(registry.ENV, None)
+    else:
+        os.environ[registry.ENV] = old
+
+
 @pytest.fixture(scope="module")
 def setup():
     model = tiny_model()
@@ -709,7 +723,7 @@ def test_the_checkpoint_interval_is_part_of_the_job(setup, tmp_path, capsys):
     assert "every" in capsys.readouterr().out
 
 
-# ------------------------------------------------------------------ the build is the registered one
+# ------------------------------------------------------------------ the registered build
 def test_a_build_the_environment_changed_is_refused(setup, monkeypatch):
     """OTPU_FORMATS makes another image than the job's int8 one: run_job refuses before
     running, for providers and verifiers alike."""
@@ -744,7 +758,7 @@ def test_the_tiny_pin_is_the_tiny_build():
     every tiny fingerprint changes too (re-pin with `tdcc-exact registry add --model tiny`)."""
     from tdcc_exact import registry
     from tdcc_exact.oracle import build_hash
-    assert build_hash("tiny") == registry.expected("tiny", "int8", 256)
+    assert build_hash("tiny") == registry.expected("tiny", "int8", 256, registry.PATH)
 
 
 def test_hashes_assume_little_endian():
@@ -765,7 +779,37 @@ def test_strict_verify_rejects_an_unregistered_model(setup, tmp_path, capsys):
     assert v["verdict"] == "REJECT" and "not registered" in v["why"]
     seed1.save(tmp_path / "job.json")
     r.receipt.save(tmp_path / "a.json")
-    base = ["verify", "--job", str(tmp_path / "job.json"), "--receipt", str(tmp_path / "a.json")]
+    base = ["verify", "--job", str(tmp_path / "job.json"),
+            "--receipt", str(tmp_path / "a.json")]
     assert main(base) == 0
     assert main(base + ["--strict"]) == 1
     assert "REJECT" in capsys.readouterr().out
+
+
+def test_a_user_registry_layers_over_the_packaged_one(tmp_path, monkeypatch):
+    """registry add writes the user registry ($TDCC_EXACT_REGISTRY), never the package."""
+    from tdcc_exact import registry
+    from tdcc_exact.cli import main
+    packaged = registry.PATH.read_text()
+    user = tmp_path / "reg" / "models.json"
+    monkeypatch.setenv(registry.ENV, str(user))
+    assert registry.user_path() == user and registry.load() == registry.load(registry.PATH)
+    registry.add("mine", "int8", 256, "ab" * 32, "test")
+    assert registry.expected("mine", "int8", 256) == "ab" * 32           # layered
+    assert registry.expected("tiny", "int8", 256) is not None            # packaged kept
+    assert registry.expected("mine", "int8", 256, registry.PATH) is None
+    registry.add("tiny", "int8", 256, "cd" * 32)                         # user over packaged
+    assert registry.expected("tiny", "int8", 256) == "cd" * 32
+    assert main(["registry", "add", "--model", "tiny", "--cap", "128"]) == 0
+    assert registry.expected("tiny", "int8", 128) is not None
+    other = tmp_path / "other.json"
+    assert main(["registry", "add", "--model", "tiny", "--path", str(other)]) == 0
+    assert set(registry.load(other)) == {"tiny|int8|256"}
+    assert registry.PATH.read_text() == packaged                        # the package untouched
+    monkeypatch.delenv(registry.ENV)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    assert registry.user_path() == tmp_path / "cfg" / "tdcc-exact" / "models.json"
+    user.write_text("not json")
+    monkeypatch.setenv(registry.ENV, str(user))
+    with pytest.raises(ValueError, match="registry"):
+        registry.load()
