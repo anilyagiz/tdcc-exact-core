@@ -35,6 +35,9 @@ answers with whichever of the two tokens has the larger logit, and posts:
 
     fingerprint = H(job || model image || answer || last logits || trace root)
 
+Before anything runs, `Job.check` refuses a job no run could answer right: the same token
+for Yes and No, a prompt longer than the KV cache, token ids outside the vocabulary.
+
 Two honest runs give the same fingerprint, on any machine. In the demo the cheating provider
 often gives the **same answer** as the honest one; only the fingerprint shows the difference.
 That is the case a buyer cannot see on a GPU marketplace.
@@ -52,10 +55,17 @@ each; a tokenizer that splits them would use the first token of each (`new_job`)
 
 ## 3. The dispute (`tdcc_exact/dispute.py`)
 
+0. **The posted trace.** The provider plays on the checkpoint list its receipt committed to:
+   `tdcc-exact dispute --receipt` checks the list against the posted trace root
+   (`matches_root`) and a list that does not match loses at once.
 1. **Bisection.** Once a run goes wrong its chain differs at every later checkpoint, so a
    binary search over the two checkpoint lists finds the first differing one in
-   log2(checkpoints) rounds. This is the game an on-chain referee plays, one round per
-   transaction.
+   log2(checkpoints) rounds. A posted list need not be a real chain (it could differ in the
+   middle and copy the last leaf), so the search starts from the last difference and always
+   ends on a checkpoint that differs while the one before agrees. This is the game an
+   on-chain referee plays, one round per transaction; `trace.merkle_proof` /
+   `merkle_verify` let a round show one checkpoint against the trace root instead of the
+   whole list.
 2. **Replay.** Both sides replay that window and record each step: where it ran, its
    encoding, the chain, and a hash of the slice's state. The first record that differs is the
    fault: `control` if a different instruction ran, `state` if the same one gave a different
@@ -101,7 +111,11 @@ the program compute the same numbers, and both are tested against
   `tdcc_exact/models.json` pins `(model, wformat, cap) -> image hash`
   (`tdcc-exact registry add --model ...`); `verify` rejects a receipt with another hash before
   re-running anything, and the program rejects a reveal whose model hash is not the job's. A
-  provider that runs fp4 instead of int8 is caught there (`tests/test_exact.py`).
+  provider that runs fp4 instead of int8 is caught there (`tests/test_exact.py`, with the
+  other cheats tested: other weights, skipped prompt tokens, an answer with no run).
+- **The verdict.** `tdcc-exact verify` gives ACCEPT, CHALLENGE (naming the fields that
+  differ) or REJECT (the reveal does not open its commitment, or the build is not the job's);
+  `--json` prints it for a verifier node.
 
 ## 6. The Solana program (`programs/tdcc_exact`)
 
