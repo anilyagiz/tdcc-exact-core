@@ -78,9 +78,11 @@ tdcc-exact demo
 5. settlement (the Solana program executes these transfers)
 ```
 
-On LFM2.5-230M, the model in the hackathon demo (needs `transformers` for its tokenizer):
+On a real model, LFM2.5-230M (about 6 minutes on the simulator; the `model` extra brings its
+tokenizer and the `hf` command):
 
 ```sh
+pip install -e '.[model]'
 hf download LiquidAI/LFM2.5-230M --local-dir models/LFM2.5-230M
 tdcc-exact demo --model models/LFM2.5-230M --question "Did it rain in Paris on 1 October 2026?"
 ```

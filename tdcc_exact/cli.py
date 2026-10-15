@@ -252,7 +252,7 @@ def main(argv=None) -> int:
     pr.add_argument("--index", type=int, required=True)
     pr.set_defaults(fn=cmd_prove)
 
-    m = sub.add_parser("demo", help="the hackathon demo, end to end")
+    m = sub.add_parser("demo", help="the whole flow: job, runs, verify, dispute, settle")
     m.add_argument("--model", default=TINY, help="tiny, or a checkpoint (models/LFM2.5-230M)")
     m.add_argument("--question", default="Did the Federal Reserve cut rates in September 2026?")
     m.add_argument("--skip-layer", type=int)
