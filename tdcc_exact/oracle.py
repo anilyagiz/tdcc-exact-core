@@ -14,6 +14,7 @@ difference in the work changes it.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -68,7 +69,7 @@ class Job:
 
     @staticmethod
     def load(path) -> "Job":
-        return Job(**json.loads(Path(path).read_text()))
+        return _load(Job, path)
 
 
 def is_tiny(model: str) -> bool:
@@ -105,7 +106,28 @@ class Receipt:
 
     @staticmethod
     def load(path) -> "Receipt":
-        return Receipt(**json.loads(Path(path).read_text()))
+        return _load(Receipt, path)
+
+
+def _read_json(path, what: str):
+    try:
+        return json.loads(Path(path).read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{path}: not a {what} (bad JSON: {e})") from None
+
+
+def _load(cls, path):
+    """A Job or Receipt file, with a message naming the file and the fields when it is not one."""
+    d = _read_json(path, cls.__name__.lower())
+    try:
+        return cls(**d)
+    except TypeError:
+        names = set(cls.__dataclass_fields__)
+        req = {k for k, f in cls.__dataclass_fields__.items()
+               if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING}
+        got = set(d) if isinstance(d, dict) else set()
+        raise ValueError(f"{path}: not a {cls.__name__.lower()} file (missing "
+                         f"{sorted(req - got)}, unknown {sorted(got - names)})") from None
 
 
 # ------------------------------------------------------------------------------- models
@@ -211,4 +233,7 @@ def save_trace(log: TraceLog, path) -> None:
 
 
 def load_trace(path) -> dict:
-    return json.loads(Path(path).read_text())
+    t = _read_json(path, "trace")
+    if not isinstance(t, dict) or not isinstance(t.get("checkpoints"), list):
+        raise ValueError(f"{path}: not a trace file (no checkpoint list)")
+    return t

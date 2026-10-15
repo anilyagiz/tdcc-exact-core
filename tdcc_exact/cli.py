@@ -271,7 +271,11 @@ def main(argv=None) -> int:
     m.set_defaults(fn=cmd_demo)
 
     a = p.parse_args(argv)
-    return a.fn(a)
+    try:
+        return a.fn(a)
+    except (OSError, ValueError) as e:     # a missing or malformed file, a bad argument
+        print(f"tdcc-exact: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

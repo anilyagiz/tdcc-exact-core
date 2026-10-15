@@ -305,6 +305,20 @@ def test_only_tiny_and_tiny_seed_name_the_random_model():
         is_tiny("tiny:abc")
 
 
+def test_the_cli_names_a_bad_file_instead_of_crashing(tmp_path, capsys):
+    from tdcc_exact.cli import main
+    (tmp_path / "half.json").write_text('{"model": "tiny"}')
+    (tmp_path / "junk.json").write_text("not json")
+    (tmp_path / "t.json").write_text('{"x": 1}')
+    for argv, says in [
+            (["run", "--job", str(tmp_path / "missing.json")], "No such file"),
+            (["run", "--job", str(tmp_path / "half.json")], "not a job file"),
+            (["run", "--job", str(tmp_path / "junk.json")], "bad JSON"),
+            (["prove", "--trace", str(tmp_path / "t.json"), "--index", "0"], "not a trace")]:
+        assert main(argv) == 2
+        assert says in capsys.readouterr().err
+
+
 def test_the_verifier_needs_no_fcntl():
     """Verifiers run on any laptop, Windows included: nothing on tdcc-exact's path may import
     fcntl (only the card and RTL hosts in opentpu/ do)."""
