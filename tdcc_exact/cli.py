@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -60,27 +61,56 @@ def cmd_run(a) -> int:
                 binding=_binding(a, a.provider))
     salt = new_salt()
     c = commitment(bytes.fromhex(r.receipt.fingerprint), a.provider, salt)
-    r.receipt.extra.update(salt=salt.hex(), commitment=c.hex())   # salt: secret until reveal
+    r.receipt.extra.update(commitment=c.hex())      # the shared receipt: no salt in it
+    salt_out = a.salt_out or f"{a.out}.salt"
+    write_private(salt_out, salt.hex() + "\n")      # secret until the reveal
     r.receipt.save(a.out)
     if a.trace:
         save_trace(r.log, a.trace)
     print(f"{a.provider}: {r.receipt.answer}  fingerprint {r.receipt.fingerprint}  "
           f"({r.receipt.steps} steps, {r.receipt.checkpoints} checkpoints)")
     print(f"  commit {c.hex()}  (post this first; reveal fingerprint + salt after the window)")
+    print(f"  salt -> {salt_out} (private: keep it until the reveal)")
     return 0
 
 
+def write_private(path, text: str) -> None:
+    """Write a file only its owner can read (0600), replacing what was there."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        os.chmod(path, 0o600)                       # (an existing file keeps its old mode)
+        f.write(text)
+
+
+def read_salt(v: str) -> bytes:
+    """--salt: 64 hex digits, or the file `run` wrote them to."""
+    text = v
+    if len(v) != 64 or os.path.exists(v):
+        with open(v) as f:
+            text = f.read().strip()
+    salt = bytes.fromhex(text)
+    if len(salt) != 32:
+        raise ValueError(f"a salt is 32 bytes, not {len(salt)}")
+    return salt
+
+
 def verify(job: Job, rec: Receipt, every: int | None = None, trace=None,
-           binding=None) -> dict:
+           binding=None, salt: bytes | None = None) -> dict:
     """A verifier's verdict on a receipt: ACCEPT, CHALLENGE (with the fields that differ) or
     REJECT (the reveal does not open the commitment, or the model build is not the job's).
     binding: the on-chain job account's address (never the receipt's own claim); None: the
-    receipt's provider name's key (local runs)."""
+    receipt's provider name's key (local runs). salt: the revealed salt (else a revealed
+    receipt's extra["salt"]); with neither, the commitment is not checked (a warning)."""
     v = {"provider": rec.provider, "job_id": rec.job_id, "posted": rec.fingerprint}
-    if "commitment" in rec.extra and not check_reveal(
-            bytes.fromhex(rec.extra["commitment"]), bytes.fromhex(rec.fingerprint),
-            rec.provider, bytes.fromhex(rec.extra.get("salt", "00" * 32))):
-        return v | {"verdict": "REJECT", "why": "the reveal does not open its commitment"}
+    notes = []
+    if "commitment" in rec.extra:
+        s = salt if salt is not None else (
+            bytes.fromhex(rec.extra["salt"]) if "salt" in rec.extra else None)
+        if s is None:
+            notes.append("the commitment is not opened (no salt revealed: --salt)")
+        elif not check_reveal(bytes.fromhex(rec.extra["commitment"]),
+                              bytes.fromhex(rec.fingerprint), rec.provider, s):
+            return v | {"verdict": "REJECT", "why": "the reveal does not open its commitment"}
     why = registry.check(job, rec.model_hash)
     if why is not None and "not registered" not in why:
         return v | {"verdict": "REJECT", "why": why}
@@ -93,20 +123,23 @@ def verify(job: Job, rec: Receipt, every: int | None = None, trace=None,
             for k in ("answer", "model_hash", "logits_hash", "trace_root", "steps")
             if getattr(mine, k) != getattr(rec, k)}
     ok = mine.fingerprint == rec.fingerprint
+    if why is not None:
+        notes.append(f"{why}; the re-run decides alone")
     return v | {"verdict": "ACCEPT" if ok else "CHALLENGE", "re_run": mine.fingerprint,
-                "differs": diff, "warning": why}
+                "differs": diff, "warning": "; ".join(notes) or None}
 
 
 def cmd_verify(a) -> int:
     rec = Receipt.load(a.receipt)
-    v = verify(Job.load(a.job), rec, a.every, a.trace, _binding(a, rec.provider))
+    v = verify(Job.load(a.job), rec, a.every, a.trace, _binding(a, rec.provider),
+               read_salt(a.salt) if a.salt else None)
     if a.json:
         print(json.dumps(v, indent=1))
     elif v["verdict"] == "REJECT":
         print(f"{v['provider']}: REJECT  ({v['why']})")
     else:
         if v["warning"]:
-            print(f"warning: {v['warning']}; the re-run decides alone")
+            print(f"warning: {v['warning']}")
         print(f"{v['provider']}: {v['verdict']}  (posted {v['posted']}, re-run {v['re_run']})")
         for k, d in v["differs"].items():
             print(f"  {k}: posted {d['posted']}, re-run {d['re_run']}")
@@ -269,6 +302,8 @@ def main(argv=None) -> int:
     r.add_argument("--provider", default="A")
     r.add_argument("--out", default="receipt.json")
     r.add_argument("--trace", help="also write the trace's checkpoints here")
+    r.add_argument("--salt-out", help="the commitment's secret salt goes here, readable by "
+                   "you only (default: <out>.salt)")
     r.add_argument("--skip-layer", type=int, help="cheat: skip this layer's matrix multiplies")
     r.add_argument("--every", type=int, help="checked against the job's (job new --every)")
     r.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "
@@ -279,6 +314,8 @@ def main(argv=None) -> int:
     v.add_argument("--job", required=True)
     v.add_argument("--receipt", required=True)
     v.add_argument("--trace", help="also write the verifier's trace here")
+    v.add_argument("--salt", help="the revealed salt (hex, or run's .salt file) to open the "
+                   "receipt's commitment")
     v.add_argument("--every", type=int, help="checked against the job's (job new --every)")
     v.add_argument("--json", action="store_true", help="print the verdict as JSON")
     v.add_argument("--binding", help="the on-chain job account's address (hex, 32 bytes); "

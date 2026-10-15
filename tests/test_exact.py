@@ -372,8 +372,41 @@ def test_the_cli_opens_and_runs_a_job(tmp_path, capsys):
                  "--trace", str(tmp_path / "a.trace.json"), "--every", str(EVERY)]) == 0
     r = json.loads(rec.read_text())
     assert r["answer"] in ("YES", "NO") and len(r["fingerprint"]) == 64
-    assert {"commitment", "salt"} <= set(r["extra"])           # ready for commit-reveal
+    assert "commitment" in r["extra"]                           # ready for commit-reveal
+    assert "salt" not in r["extra"]                             # the shared file: no secret
     assert "commit " in capsys.readouterr().out
+
+
+def test_the_salt_stays_out_of_the_shared_receipt(tmp_path, capsys):
+    """run writes the salt to a private file (0600); verify opens the commitment with it
+    (--salt, hex or the file), rejects a wrong one, and without one warns and re-runs."""
+    import json
+    import stat
+    from tdcc_exact.cli import main
+    job, rec = tmp_path / "job.json", tmp_path / "a.json"
+    assert main(["job", "new", "--question", "Will it rain tomorrow?", "--out", str(job),
+                 "--every", str(EVERY)]) == 0
+    assert main(["run", "--job", str(job), "--provider", "A", "--out", str(rec)]) == 0
+    salt = tmp_path / "a.json.salt"
+    assert stat.S_IMODE(salt.stat().st_mode) == 0o600
+    assert len(bytes.fromhex(salt.read_text().strip())) == 32
+    assert salt.read_text().strip() not in rec.read_text()
+    base = ["verify", "--job", str(job), "--receipt", str(rec)]
+    capsys.readouterr()
+    assert main(base + ["--salt", str(salt)]) == 0
+    assert main(base + ["--salt", salt.read_text().strip()]) == 0
+    assert main(base + ["--salt", "00" * 32]) == 1
+    assert "REJECT" in capsys.readouterr().out
+    assert main(base) == 0
+    assert "not opened" in capsys.readouterr().out
+    r = json.loads(rec.read_text())                             # a revealed receipt
+    r["extra"]["salt"] = salt.read_text().strip()
+    rec.write_text(json.dumps(r))
+    assert main(base) == 0
+    out = tmp_path / "custom.salt"
+    assert main(["run", "--job", str(job), "--provider", "A", "--out", str(rec),
+                 "--salt-out", str(out)]) == 0
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
 
 
 def test_the_verifier_needs_no_fcntl():
