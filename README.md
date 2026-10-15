@@ -1,5 +1,8 @@
 # TDCC Exact Core
 
+[![CI](https://github.com/anilyagiz/tdcc-exact-core/actions/workflows/exact.yml/badge.svg?branch=main)](https://github.com/anilyagiz/tdcc-exact-core/actions/workflows/exact.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **An AI chip whose every answer anyone can re-check, and a Solana market to rent it.**
 
 Exact Core is the accelerator behind TDCC Exact, from The Decentralized Compute Company. It is
@@ -17,7 +20,9 @@ the first instruction a dishonest run got wrong.
 
 It runs on a Kintex-7 FPGA PCIe card (Inspur YPCB-00338). **Honest status:** the Exact layer
 (trace log, fingerprint, dispute) runs on the bit-exact simulator today; the trace log in
-hardware and its speed on the card are not built or measured yet.
+hardware and its speed on the card are not built or measured yet. The Solana program is
+**unaudited and on devnet only**, with a test USDC mint, and an arbiter key decides challenges
+until the on-chain bisection game lands ([SECURITY.md](SECURITY.md), [TODO.md](TODO.md)).
 
 ## How TDCC Exact works
 
