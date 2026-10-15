@@ -70,6 +70,8 @@ include = [
     "tests/test_exact.py",
     "tests/test_chain.py",
     "tests/test_api.py",
+    "tests/test_node.py",
+    "tests/test_indexer.py",
 ]
 
 [tool.ruff.lint]

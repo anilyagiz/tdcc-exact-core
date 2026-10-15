@@ -25,6 +25,7 @@ from .backend import SkipLayer
 from .commit import check_reveal, commitment, new_salt
 from .dispute import bisect, first_fault, matches_root
 from .indexer import cmd_market
+from .node.cli import add_parser as add_node_parser
 from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
                      model_name, new_job, run_job, save_trace)
 from .settle import accept, slash
@@ -284,6 +285,8 @@ def main(argv=None) -> int:
     mk.add_argument("--limit", type=int, default=100, help="events: the last N transactions")
     mk.add_argument("--json", action="store_true")
     mk.set_defaults(fn=cmd_market)
+
+    add_node_parser(sub)
 
     a = p.parse_args(argv)
     try:
