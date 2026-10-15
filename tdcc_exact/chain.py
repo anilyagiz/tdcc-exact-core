@@ -488,10 +488,14 @@ class Market:
 
     # --------------------------------------------------------------- jobs
     def open_job(self, renter: Keypair, provider: Pubkey, job_id: int, job_digest: bytes,
-                 model_hash: bytes, price: int) -> tuple[Pubkey, str]:
+                 model_hash: bytes, price: int,
+                 commit_deadline: int = 0) -> tuple[Pubkey, str]:
+        """Escrow `price` for a job with `provider`. commit_deadline: 0 for commit_window
+        slots from now, or an absolute slot within that (one deadline for a fan-out)."""
         r = renter.pubkey()
         job = self.job_pda(r, job_id)
-        data = u64(job_id) + b32(job_digest) + b32(model_hash) + u64(price)
+        data = (u64(job_id) + b32(job_digest) + b32(model_hash) + u64(price)
+                + u64(commit_deadline))
         sig = self.rpc.send([self._ix("open_job",
                                       [S(r, True), R(self.config),
                                        W(self.provider_pda(provider)), W(job), R(self.mint),

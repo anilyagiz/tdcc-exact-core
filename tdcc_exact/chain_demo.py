@@ -78,8 +78,10 @@ def run(a) -> int:
     say(f"   Q: {question!r} ({len(job.prompt_ids)} tokens)")
     base = int(time.time() * 1000)
     jobs = {}
+    deadline = rpc.slot() + m.params().commit_window      # one commit deadline for A and B
     for i, (name, p) in enumerate((("A", pa), ("B", pb))):
-        acct, sig = m.open_job(renter, p.pubkey(), base + i, job.digest, model_hash, a.price)
+        acct, sig = m.open_job(renter, p.pubkey(), base + i, job.digest, model_hash, a.price,
+                               deadline)
         jobs[name] = acct
         say(f"   job {name}: {link(str(acct), 'address')}\n   open_job: {link(sig)}")
 

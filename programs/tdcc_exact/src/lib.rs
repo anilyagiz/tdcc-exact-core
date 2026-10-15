@@ -242,12 +242,17 @@ pub mod tdcc_exact {
         Ok(())
     }
 
+    /// commit_deadline: 0 for the slot commit_window from now, or an absolute slot after now
+    /// and at most commit_window away, so a renter that opens the same job with several
+    /// providers (in several transactions) gives them all one deadline: none of them can wait
+    /// for another's reveal. (The job's whole life stays within the bound initialize checks.)
     pub fn open_job(
         ctx: Context<OpenJob>,
         job_id: u64,
         job_digest: [u8; 32],
         model_hash: [u8; 32],
         price: u64,
+        commit_deadline: u64,
     ) -> Result<()> {
         let c = &ctx.accounts.config;
         let p = &ctx.accounts.provider;
@@ -267,9 +272,18 @@ pub mod tdcc_exact {
             price,
         )?;
         let now = Clock::get()?.slot;
-        let commit_deadline = now
+        let latest = now
             .checked_add(c.commit_window)
             .ok_or(ExactError::Overflow)?;
+        let commit_deadline = if commit_deadline == 0 {
+            latest
+        } else {
+            require!(
+                commit_deadline > now && commit_deadline <= latest,
+                ExactError::BadParams
+            );
+            commit_deadline
+        };
         let j = &mut ctx.accounts.job;
         j.config = ctx.accounts.config.key();
         j.renter = ctx.accounts.renter.key();

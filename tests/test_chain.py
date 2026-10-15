@@ -602,3 +602,24 @@ def test_a_real_run_reveals(world):
     m.reveal_run(w["a"], onchain, r, leaves, salt)
     j = m.job(onchain)
     assert j.fingerprint.hex() == r.fingerprint and j.answer == (r.answer == "YES")
+
+
+def test_a_fan_out_shares_one_commit_deadline(world):
+    """The renter opens one job with A and with B in two transactions and gives both the same
+    absolute commit deadline; one later than commit_window from now, or already past, is
+    refused."""
+    w, m, rpc = world, world["m"], world["rpc"]
+    other = _provider(w)
+    deadline = rpc.slot() + WORLD.commit_window
+    jobs = []
+    for p in (w["a"], other):
+        jid = w["next"][0]
+        w["next"][0] += 1
+        jobs.append(m.open_job(w["renter"], p.pubkey(), jid, bytes([jid % 256]) * 32, MODEL,
+                               PRICE, deadline)[0])
+    assert [m.job(j).commit_deadline for j in jobs] == [deadline, deadline]
+    assert m.job(jobs[0]).reveal_deadline == deadline + WORLD.commit_window
+    for bad in (rpc.slot() + WORLD.commit_window + 5, 1):
+        with pytest.raises(ChainError, match="BadParams"):
+            m.open_job(w["renter"], w["a"].pubkey(), 99_000 + bad % 1000, bytes(32), MODEL,
+                       PRICE, bad)
