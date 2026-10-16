@@ -24,13 +24,16 @@ they break a guarantee of the verification layer.
 
 The program is **unaudited** and runs on **devnet only**, with a test USDC mint. Do not use it
 with real funds. Its known limits are design decisions not yet made rather than bugs, and are
-listed in [TODO.md](TODO.md) (items 6 and 7) and [docs/exact.md](docs/exact.md):
+listed in [TODO.md](TODO.md) (items 6 and 7), [docs/exact.md](docs/exact.md) and
+[docs/threat-model.md](docs/threat-model.md):
 
-- challenges are decided by an arbiter, the market's admin key, until the on-chain bisection
-  game replaces it;
-- there is no challenge bond and no random verifier selection yet, and the arbiter has no
-  deadline: a challenged job holds its escrow and its provider's stake until it rules;
-- DRAM stores are not in the trace's state hash; a wrong final store is caught by the logits
-  hash only.
+- challenges are decided by an arbiter key (separate from the admin, rotatable, with a ruling
+  deadline after which anyone can dismiss) until the on-chain bisection game replaces it; an
+  arbiter that colludes with a provider can still dismiss a valid challenge;
+- verifiers are not selected at random, and nothing pays them when nobody cheats (the
+  verifier's dilemma);
+- a renter can open a job for any staked provider without its consent, holding part of its
+  stake until the job expires;
+- providers keep their traces themselves; the job store is not yet replicated.
 
 Reports about these are still welcome when they show a concrete path to losing funds.
