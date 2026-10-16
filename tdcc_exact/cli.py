@@ -30,6 +30,7 @@ from .indexer import cmd_market
 from .node.cli import add_parser as add_node_parser
 from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
                      model_name, new_job, run_job, save_trace)
+from .renter import add_parser as add_renter_parser
 from .settle import accept, slash
 from .trace import EVERY, Checkpoint, merkle_proof, merkle_root, merkle_verify
 from .verifier import dispute, verify    # (the library functions; re-exported from here)
@@ -311,6 +312,7 @@ def main(argv=None) -> int:
     ex.set_defaults(fn=cmd_explore)
 
     add_node_parser(sub)
+    add_renter_parser(sub)
 
     a = p.parse_args(argv)
     try:
