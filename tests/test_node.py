@@ -738,3 +738,25 @@ def test_arbiter_on_a_validator(tmp_path, job):
     assert sw["revealed"] == "missing" and sw["fault_step"] == d.lo + 1
     assert main(cmd) == 0                       # nothing left to rule on
     srv.shutdown()
+
+
+def test_the_verifiers_sample_cannot_be_computed_from_public_keys():
+    """A provider that knew which jobs go unchecked would cheat only on those: the sample
+    must depend on the verifier's secret, not on anything public."""
+    import hashlib
+    from solders.keypair import Keypair
+    from solders.pubkey import Pubkey
+    from tdcc_exact.node.verifier import VerifierNode
+    owner = Keypair()
+    node = VerifierNode.__new__(VerifierNode)
+    node.owner, node.rate = owner, 0.5
+    keys = [Pubkey.from_bytes(bytes([i]) * 32) for i in range(64)]
+    public = [int.from_bytes(hashlib.sha256(b"tdcc-exact/sample/v1" + bytes(k)
+                                            + bytes(owner.pubkey())).digest()[:8], "little")
+              < 2 ** 63 for k in keys]
+    mine = [node.sampled(k) for k in keys]
+    assert 10 < sum(mine) < 54                                   # about half
+    assert mine != public                                        # not the public formula
+    other = VerifierNode.__new__(VerifierNode)
+    other.owner, other.rate = Keypair(), 0.5
+    assert [other.sampled(k) for k in keys] != mine              # each verifier its own sample

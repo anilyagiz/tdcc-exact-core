@@ -34,8 +34,11 @@ class VerifierNode:
         self.rate, self.log = rate, log
 
     def sampled(self, key) -> bool:
-        x = hashlib.sha256(b"tdcc-exact/sample/v1" + bytes(key)
-                           + bytes(self.owner.pubkey())).digest()
+        """Whether this verifier re-runs the job: a hash of the job and of the verifier's
+        SECRET key, so a provider cannot work out in advance which of its jobs go unchecked
+        (with the public key, anyone could compute every verifier's sample before running)."""
+        secret = bytes(self.owner)[:32]                 # the ed25519 seed: known to no one else
+        x = hashlib.sha256(b"tdcc-exact/sample/v2" + bytes(key) + secret).digest()
         return int.from_bytes(x[:8], "little") < self.rate * 2 ** 64
 
     def run_once(self) -> dict:
