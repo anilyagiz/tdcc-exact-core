@@ -511,3 +511,84 @@ def test_arbiter_refuses_another_key(arb):
     from tdcc_exact.node.arbiter import ArbiterNode, NotArbiter
     with pytest.raises(NotArbiter):
         ArbiterNode(arb["chain"], Keypair(), arb["store"], arb["dir"] / "x.json")
+
+
+@pytest.mark.skipif(not _chain_up(), reason=f"no validator with the program at {URL}")
+def test_arbiter_on_a_validator(tmp_path, job):
+    """Honest A, cheating B (a skipped layer), and a job of A's whose trace never reaches the
+    store: the verifier challenges B, a verifier challenges A's two with a made-up
+    fingerprint, and the arbiter (its own key, not the admin's) slashes B, dismisses A's
+    first and slashes the one without a trace."""
+    from solders.keypair import Keypair
+
+    from tdcc_exact import registry
+    from tdcc_exact.chain import Market, Params, Rpc
+    from tdcc_exact.cli import main
+    from tdcc_exact.node.chainio import Chain
+    from tdcc_exact.node.common import Models
+    from tdcc_exact.node.provider import ProviderNode
+    from tdcc_exact.node.verifier import VerifierNode
+
+    rpc = Rpc(URL)
+    admin, renter, verifier, a, b, arbiter, treasury = (Keypair() for _ in range(7))
+    for k in (admin, renter, verifier, a, b, arbiter):
+        rpc.airdrop(k.pubkey(), 2_000_000_000)
+    m = Market(rpc, admin, "localnet")
+    params = Params(commit_window=20, challenge_window=80, arbiter_window=150,
+                    unstake_cooldown=300, arbiter=arbiter.pubkey())
+    m.initialize(treasury.pubkey(), params)
+    for p in (a, b):
+        m.mint_to(p.pubkey(), 50_000_000)
+        m.register_provider(p)
+        m.stake(p, 50_000_000)
+    m.mint_to(renter.pubkey(), 10_000_000)
+    m.mint_to(verifier.pubkey(), 3 * params.challenge_bond)
+
+    store_dir = tmp_path / "store"
+    srv, url = start(DirStore(store_dir))
+    store = HttpStore(url)
+    store.put_job(job)
+    pinned = bytes.fromhex(registry.expected("tiny", job.wformat, job.cap))
+    base = int(time.time() * 1000)
+    ja, _ = m.open_job(renter, a.pubkey(), base, job.digest, pinned, 1_000_000)
+    jb, _ = m.open_job(renter, b.pubkey(), base + 1, job.digest, pinned, 1_000_000)
+    jc, _ = m.open_job(renter, a.pubkey(), base + 2, job.digest, pinned, 1_000_000)
+
+    chain, models, quiet = Chain(m), Models(), (lambda *x: None)
+    pa = ProviderNode(chain, a, store, tmp_path / "a" / "state.json", models, log=quiet)
+    pb = ProviderNode(chain, b, store, tmp_path / "b" / "state.json", models,
+                      skip_layer=1, log=quiet)
+    assert pb.run_once() == {str(jb): "committed"}
+    assert pa.run_once(wait=True) == {str(ja): "published", str(jc): "published"}
+    assert pb.run_once(wait=True) == {str(jb): "published"}
+    sa = pa.state.get(str(ja))
+    ev = chain.revealed(ja)                     # the reveal's event: what the account lacks
+    assert ev["logits_hash"] == sa["logits_hash"] and ev["answer"] == int(sa["answer"] == "YES")
+    (store_dir / "traces" / f"{m.job(jc).trace_root.hex()}.json").unlink()
+
+    v = VerifierNode(chain, verifier, store, tmp_path / "v" / "state.json", models, log=quiet)
+    assert v.run_once() == {str(ja): "accepted", str(jb): "challenged", str(jc): "accepted"}
+    assert v.state.get(str(jc))["trace"] == "missing"
+    for k in (ja, jc):                          # challenges the arbiter must sort out
+        chain.challenge(verifier, k, bytes([7]) * 32)
+    assert {m.job(k).state for k in (ja, jb, jc)} == {"Challenged"}
+
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    (keys / "admin.json").write_text(json.dumps(list(bytes(admin))))
+    cmd = ["node", "arbiter", "--rpc", URL, "--keys", str(keys), "--store", url,
+           "--trace-grace", "0", "--once"]
+    with pytest.raises(SystemExit, match="not the market's arbiter"):
+        main(cmd)                               # admin.json alone: the admin is not the arbiter
+    (keys / "arbiter.json").write_text(json.dumps(list(bytes(arbiter))))
+    assert main(cmd) == 0
+    assert m.job(ja).state == "Revealed"
+    assert m.job(jb).state == "Slashed" and m.job(jc).state == "Slashed"
+    st = json.loads((keys / "arbiter.state" / "state.json").read_text())
+    assert st[str(ja)]["ruling"] == "dismissed"
+    assert st[str(jb)]["ruling"] == "slashed" and st[str(jb)]["fault_step"] >= 1
+    assert st[str(jc)]["ruling"] == "slashed" and st[str(jc)]["divergence_index"] == 0
+    assert st[str(jc)]["trace"] == "missing"
+    assert m.provider(b.pubkey()).stake == 0 and m.provider(a.pubkey()).stake == 0
+    assert main(cmd) == 0                       # nothing left to rule on
+    srv.shutdown()
