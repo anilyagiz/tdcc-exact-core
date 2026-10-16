@@ -3,7 +3,8 @@
 Chain wraps a chain.Market: listing Job accounts (getProgramAccounts filtered by the account
 discriminator, the market's config and, for a provider, the provider field), the slot, the
 market's arbiter key, a job's ReceiptRevealed event, and the instructions a node sends
-(commit_receipt, reveal_receipt, challenge; the arbiter's slash and dismiss).
+(accept_job, commit_receipt, reveal_receipt, challenge; the arbiter's slash and dismiss; the
+settler's settle, expire, cancel_job and close_job).
 
 The Job account's layout (programs/tdcc_exact, `pub struct Job`): an 8-byte discriminator,
 then config, renter, provider (32 bytes each), ... so the memcmp offsets of the fields the
@@ -115,6 +116,10 @@ class Chain:
         return None
 
     # ------------------------------------------------------------------ writes
+    def accept(self, owner, job) -> str:
+        """The provider takes an Offered job on (it turns Open; the commit deadline starts)."""
+        return self.m.accept_job(owner, job)
+
     def commit(self, owner, job, commitment: bytes) -> str:
         return self.m.commit_receipt(owner, job, commitment)
 
@@ -136,6 +141,19 @@ class Chain:
         return self.rpc.send([m.token_account_ix(j.verifier, arbiter.pubkey()),
                               m.slash_ix(job, j.renter, j.provider, j.verifier,
                                          divergence_index, fault_step)], arbiter)
+
+    # what a settler sends (settler.py): open to anyone but cancel, the renter's
+    def settle(self, payer, job) -> str:
+        return self.m.settle(payer, job)
+
+    def expire(self, payer, job) -> str:
+        return self.m.expire(payer, job)
+
+    def cancel(self, renter, job) -> str:
+        return self.m.cancel_job(renter, job)
+
+    def close(self, caller, job) -> str:
+        return self.m.close_job(job, caller)
 
     def dismiss(self, caller, job) -> str:
         """The arbiter rejects the challenge (anyone may, after the ruling deadline); the

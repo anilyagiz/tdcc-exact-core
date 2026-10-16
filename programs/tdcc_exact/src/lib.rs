@@ -3,8 +3,14 @@
 //! A job's life (slots, from the job's `open_job`):
 //!
 //! ```text
-//!     open_job ──► commit_receipt ──► reveal_receipt ──► settle            (80% host, 20% TDCC)
-//!     (renter)     (provider, until    (provider, after    (anyone, after the
+//!     open_job ──► accept_job ──► (Open, below)
+//!     (renter;     (the job's provider,
+//!      Offered)     until accept_deadline)
+//!         │
+//!         └──► cancel_job    (the renter, after the accept deadline: the escrow back)
+//!
+//!     Open ──────► commit_receipt ──► reveal_receipt ──► settle            (80% host, 20% TDCC)
+//!                  (provider, until    (provider, after    (anyone, after the
 //!                   commit_deadline)    commit_deadline)    challenge window)
 //!                                            │
 //!                                            └──► challenge ──► slash      (arbiter: refund the
@@ -18,6 +24,28 @@
 //!                                                                     challenge until the
 //!                                                                     challenge deadline)
 //! ```
+//!
+//! Consent. A renter cannot put a job on a provider: `open_job` makes the job `Offered` (the
+//! escrow moves into the vault, but the provider's open-job count does not rise, so none of its
+//! stake is locked and an unwanted offer costs it nothing). Only the job's provider can
+//! `accept_job`, until the job's `accept_deadline`. Acceptance is when the provider takes on
+//! the job's obligations: the job turns `Open`, counts in `open_jobs` (locking the stake until
+//! the job ends) and its commit deadline is fixed. A provider that does not accept (it refused
+//! the job, or it is offline) lets the offer lapse: after the accept deadline the renter
+//! `cancel_job`s it and gets the escrow back, with no penalty on anyone (the job ends Expired,
+//! with a JobCancelled event).
+//!
+//! The deadlines. The accept deadline is where the commit deadline was before the offer phase:
+//! opened slot + commit_window, or the renter's absolute commit deadline. On acceptance the
+//! commit deadline becomes acceptance + commit_window when the renter gave none, so a provider
+//! that accepts late is not squeezed; a renter-given absolute deadline stays as it is
+//! (acceptance must come by it). That deadline exists so that the providers of a fan-out (one
+//! job opened with several providers) share one commit deadline: none may commit after
+//! another's reveal and copy it, and a deadline counted from each acceptance would let a late
+//! acceptor do exactly that. Either way the commit deadline is at most commit_window after
+//! acceptance, so a job's life counted from acceptance keeps the bound initialize checks
+//! against the unstake cooldown (and accept_job, like open_job, refuses a provider that is
+//! leaving or under the minimum stake).
 //!
 //! The arbiter has `arbiter_window` slots from the challenge (the job's ruling_deadline) to slash
 //! or dismiss; after that anyone may dismiss and the receipt stands.
@@ -114,12 +142,12 @@ pub mod tdcc_exact {
         require!(params.challenge_bond > 0, ExactError::BadParams);
         require!(params.arbiter_window > 0, ExactError::BadParams);
         require!(params.arbiter != Pubkey::default(), ExactError::BadParams);
-        // A job's whole life, from open_job to the last moment the arbiter may still slash, is
-        // at most commit_window (commit) + commit_window (reveal) + challenge_window (the last
-        // challenge, a later one after a dismissal included) + arbiter_window (its ruling).
-        // request_unstake stops new jobs at once, so with a longer cooldown every job opened
-        // before the request is ruled before the stake can leave: the slash always finds the
-        // stake, even if the open_jobs counter were ever released early.
+        // A job's whole life, from accept_job to the last moment the arbiter may still slash,
+        // is at most commit_window (commit) + commit_window (reveal) + challenge_window (the
+        // last challenge, a later one after a dismissal included) + arbiter_window (its
+        // ruling). request_unstake stops new acceptances at once, so with a longer cooldown
+        // every job accepted before the request is ruled before the stake can leave: the slash
+        // always finds the stake, even if the open_jobs counter were ever released early.
         let life = params
             .commit_window
             .checked_mul(2)
@@ -242,10 +270,15 @@ pub mod tdcc_exact {
         Ok(())
     }
 
-    /// commit_deadline: 0 for the slot commit_window from now, or an absolute slot after now
-    /// and at most commit_window away, so a renter that opens the same job with several
-    /// providers (in several transactions) gives them all one deadline: none of them can wait
-    /// for another's reveal. (The job's whole life stays within the bound initialize checks.)
+    /// Offer a job to a provider: the escrow moves in, the job is Offered until the provider
+    /// accepts it (accept_job) or the renter cancels it after the accept deadline.
+    ///
+    /// commit_deadline: 0 for the slot commit_window from the acceptance, or an absolute slot
+    /// after now and at most commit_window away, so a renter that opens the same job with
+    /// several providers (in several transactions) gives them all one deadline: none of them
+    /// can wait for another's reveal. The accept deadline is commit_window from now, or that
+    /// absolute slot. (The job's whole life from acceptance stays within the bound initialize
+    /// checks.)
     pub fn open_job(
         ctx: Context<OpenJob>,
         job_id: u64,
@@ -275,7 +308,8 @@ pub mod tdcc_exact {
         let latest = now
             .checked_add(c.commit_window)
             .ok_or(ExactError::Overflow)?;
-        let commit_deadline = if commit_deadline == 0 {
+        // the accept deadline: commit_window from now, or the renter's absolute commit deadline
+        let accept_deadline = if commit_deadline == 0 {
             latest
         } else {
             require!(
@@ -292,12 +326,11 @@ pub mod tdcc_exact {
         j.job_digest = job_digest;
         j.model_hash = model_hash;
         j.price = price;
-        j.state = JobState::Open;
+        j.state = JobState::Offered;
         j.opened_slot = now;
+        // 0 until accept_job sets it, unless the renter fixed it (a fan-out's shared deadline)
         j.commit_deadline = commit_deadline;
-        j.reveal_deadline = commit_deadline
-            .checked_add(c.commit_window)
-            .ok_or(ExactError::Overflow)?;
+        j.reveal_deadline = 0; // set by accept_job
         j.challenge_deadline = 0;
         j.commitment = [0; 32];
         j.fingerprint = [0; 32];
@@ -310,14 +343,78 @@ pub mod tdcc_exact {
         j.ruling_deadline = 0;
         j.answer = NO_ANSWER;
         j.bump = ctx.bumps.job;
-        let p = &mut ctx.accounts.provider;
-        p.open_jobs = p.open_jobs.checked_add(1).ok_or(ExactError::Overflow)?;
+        j.accept_deadline = accept_deadline;
         emit!(JobOpened {
             job: j.key(),
             renter: j.renter,
             provider: j.provider,
             price,
             job_digest
+        });
+        Ok(())
+    }
+
+    /// The job's provider takes the offered job on (until its accept deadline): the job turns
+    /// Open, counts in the provider's open jobs (its stake is locked until the job ends), and
+    /// the commit deadline is fixed: commit_window from now, or the renter's absolute one.
+    pub fn accept_job(ctx: Context<AcceptJob>) -> Result<()> {
+        let c = &ctx.accounts.config;
+        let p = &ctx.accounts.provider;
+        // open_job's test again: a provider that is leaving (or was slashed) takes on no job
+        require!(
+            p.stake >= c.min_stake && p.unlock_slot == 0,
+            ExactError::ProviderNotStaked
+        );
+        let window = c.commit_window;
+        let now = Clock::get()?.slot;
+        let j = &mut ctx.accounts.job;
+        require!(j.state == JobState::Offered, ExactError::WrongState);
+        require!(now <= j.accept_deadline, ExactError::WindowClosed);
+        if j.commit_deadline == 0 {
+            j.commit_deadline = now.checked_add(window).ok_or(ExactError::Overflow)?;
+        }
+        j.reveal_deadline = j
+            .commit_deadline
+            .checked_add(window)
+            .ok_or(ExactError::Overflow)?;
+        j.state = JobState::Open;
+        let p = &mut ctx.accounts.provider;
+        p.open_jobs = p.open_jobs.checked_add(1).ok_or(ExactError::Overflow)?;
+        emit!(JobAccepted {
+            job: j.key(),
+            provider: p.owner,
+            commit_deadline: j.commit_deadline,
+            reveal_deadline: j.reveal_deadline
+        });
+        Ok(())
+    }
+
+    /// The provider did not accept by the accept deadline: the renter takes the escrow back,
+    /// with no penalty (the provider never took the job on). The job ends Expired and closes
+    /// as any finished job does.
+    pub fn cancel_job(ctx: Context<CancelJob>) -> Result<()> {
+        let j = &ctx.accounts.job;
+        require!(j.state == JobState::Offered, ExactError::WrongState);
+        require!(
+            Clock::get()?.slot > j.accept_deadline,
+            ExactError::WindowOpen
+        );
+        let price = j.price;
+        let a = &ctx.accounts;
+        pay_out(
+            &a.token_program,
+            &a.vault,
+            &a.renter_token,
+            &a.mint,
+            &a.config,
+            price,
+        )?;
+        let j = &mut ctx.accounts.job;
+        j.state = JobState::Expired;
+        emit!(JobCancelled {
+            job: j.key(),
+            renter: j.renter,
+            refunded: price
         });
         Ok(())
     }
@@ -758,6 +855,7 @@ pub enum JobState {
     Settled,
     Slashed,
     Expired,
+    Offered, // open_job's, until accept_job (last: the earlier states keep their u8 codes)
 }
 
 #[account]
@@ -786,6 +884,7 @@ pub struct Job {
     pub ruling_deadline: u64, // challenge_slot + arbiter_window
     pub answer: u8,           // the revealed receipt's: 0 = NO, 1 = YES (NO_ANSWER before)
     pub bump: u8,
+    pub accept_deadline: u64, // the last slot accept_job takes the Offered job
 }
 
 // ------------------------------------------------------------------------- accounts
@@ -870,7 +969,7 @@ pub struct OpenJob<'info> {
     pub renter: Signer<'info>,
     #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = mint, has_one = vault)]
     pub config: Account<'info, Config>,
-    #[account(mut, seeds = [b"provider", config.key().as_ref(), provider.owner.as_ref()], bump = provider.bump)]
+    #[account(seeds = [b"provider", config.key().as_ref(), provider.owner.as_ref()], bump = provider.bump)]
     pub provider: Account<'info, Provider>,
     #[account(init, payer = renter, space = 8 + Job::INIT_SPACE,
               seeds = [b"job", config.key().as_ref(), renter.key().as_ref(), &job_id.to_le_bytes()], bump)]
@@ -882,6 +981,32 @@ pub struct OpenJob<'info> {
     pub vault: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct AcceptJob<'info> {
+    pub owner: Signer<'info>,
+    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut, has_one = config, constraint = job.provider == owner.key() @ ExactError::NotYourJob)]
+    pub job: Account<'info, Job>,
+    #[account(mut, seeds = [b"provider", config.key().as_ref(), owner.key().as_ref()], bump = provider.bump)]
+    pub provider: Account<'info, Provider>,
+}
+
+#[derive(Accounts)]
+pub struct CancelJob<'info> {
+    pub renter: Signer<'info>,
+    #[account(seeds = [b"config", config.admin.as_ref()], bump = config.bump, has_one = mint, has_one = vault)]
+    pub config: Account<'info, Config>,
+    #[account(mut, has_one = config, constraint = job.renter == renter.key() @ ExactError::NotTheRenter)]
+    pub job: Account<'info, Job>,
+    pub mint: Account<'info, Mint>,
+    #[account(mut)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(mut, token::mint = mint, token::authority = renter)]
+    pub renter_token: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
@@ -1068,6 +1193,21 @@ pub struct JobOpened {
 }
 
 #[event]
+pub struct JobAccepted {
+    pub job: Pubkey,
+    pub provider: Pubkey,
+    pub commit_deadline: u64,
+    pub reveal_deadline: u64,
+}
+
+#[event]
+pub struct JobCancelled {
+    pub job: Pubkey,
+    pub renter: Pubkey,
+    pub refunded: u64,
+}
+
+#[event]
 pub struct ReceiptCommitted {
     pub job: Pubkey,
     pub commitment: [u8; 32],
@@ -1152,6 +1292,8 @@ pub enum ExactError {
     ArbiterChallenger,
     #[msg("the fingerprint is not the hash of the receipt's parts")]
     BadReceipt,
+    #[msg("only the job's renter may do this")]
+    NotTheRenter,
 }
 
 #[cfg(test)]

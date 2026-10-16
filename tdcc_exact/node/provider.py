@@ -1,8 +1,10 @@
-"""The provider node: find the jobs opened for this provider, run them, commit, reveal.
+"""The provider node: find the jobs offered to this provider, accept, run, commit, reveal.
 
 Each pass (`run_once`) lists the market's Job accounts naming this provider and moves each
 one step along, as far as the chain's state and the slot allow:
 
+    Offered     fetch the Job from the store under the on-chain digest and check it (below);
+                if it passes, accept_job (before the job's accept_deadline), then as Open
     Open        fetch the Job from the store under the on-chain digest, check it (below), run
                 it, save the receipt, its salt and its trace, then commit_receipt
     Committed   once the slot is past commit_deadline, reveal_receipt (from the saved salt)
@@ -15,11 +17,12 @@ one step along, as far as the chain's state and the slot allow:
                 bisection names the same (lo, hi) when the challenger's trace is honest
                 (the protocol: tdcc_exact/node/__init__.py). Once per challenge.
 
-Before committing the node refuses a job unless the Job it fetched hashes to the on-chain
+Before accepting (and again before committing) the node refuses a job unless the Job it fetched hashes to the on-chain
 job_digest and the on-chain model_hash is the registry's pinned hash for the job's
 (model, wformat, cap): otherwise a renter could pin a hash no honest run can produce and
-have the provider's receipt challenged. A refused job is left alone: it expires back to the
-renter at no cost to the provider.
+have the provider's receipt challenged. A refused offer is left alone: it is never accepted,
+so none of the provider's stake is locked by it, and after its accept deadline the renter
+cancels it (cancel_job) and takes the escrow back at no cost to the provider.
 
 Everything a restart needs (the salt above all) is written to the state file before the
 transaction that depends on it, and the node commits only a job the chain shows Open, so it
@@ -102,6 +105,19 @@ class ProviderNode:
     def _step(self, key, j, s: dict) -> str | None:
         k = str(key)
         slot = self.chain.slot()
+        if j.state == "Offered":
+            if slot > j.accept_deadline:
+                self.state.set(k, status="missed")
+                self.log(f"{k[:8]}: accept window closed before this node got to it")
+                return "missed"
+            job = self._check(k, j)
+            if job is None:
+                return "refused"
+            sig = self.chain.accept(self.owner, key)
+            self.state.set(k, status="accepted", accept_sig=sig)
+            self.log(f"{k[:8]}: accepted  {sig}")
+            j = self.chain.job(key)               # Open now, with its commit deadline
+            s = self.state.get(k) or {}
         if j.state == "Open":
             if slot > j.commit_deadline:
                 self.state.set(k, status="missed")
@@ -147,29 +163,43 @@ class ProviderNode:
         self.log(f"{k[:8]}: refused: {why}")
         return self.state.set(k, status="refused", why=why)
 
-    def _prepare(self, key, j) -> dict:
-        """Fetch, check and run the job; save what the commit and the reveal need."""
-        k = str(key)
+    def _check(self, k: str, j):
+        """The store's Job under the on-chain digest if this node can take it on: the digest
+        is the on-chain one, the on-chain model hash is the registry's pinned one for the
+        job's model, and the job is answerable. Else None (the refusal is recorded)."""
         try:
             job = self.store.get_job(j.job_digest.hex())
         except Tampered as e:
-            return self._refuse(k, f"the store's job does not match the on-chain digest ({e})")
+            self._refuse(k, f"the store's job does not match the on-chain digest ({e})")
+            return None
         except NotFound:
             raise StoreError(f"job {j.job_digest.hex()[:16]}.. is not published yet") from None
         if job.digest != j.job_digest:          # (the store checked; this is the contract)
-            return self._refuse(k, "job digest differs from the on-chain one")
+            self._refuse(k, "job digest differs from the on-chain one")
+            return None
         want = registry.expected(model_name(job.model), job.wformat, job.cap,
                                  self.registry_path)
         if want is None:
-            return self._refuse(k, f"model {model_name(job.model)} ({job.wformat}, cap "
-                                   f"{job.cap}) is not in the registry")
+            self._refuse(k, f"model {model_name(job.model)} ({job.wformat}, cap "
+                            f"{job.cap}) is not in the registry")
+            return None
         if want != j.model_hash.hex():
-            return self._refuse(k, f"on-chain model hash {j.model_hash.hex()[:16]}.. is not "
-                                   f"the registered {want[:16]}..")
+            self._refuse(k, f"on-chain model hash {j.model_hash.hex()[:16]}.. is not "
+                            f"the registered {want[:16]}..")
+            return None
         try:
             job.check(getattr(self.models.get(job.model)[0], "vocab", None))
         except ValueError as e:
-            return self._refuse(k, f"no run can answer this job: {e}")
+            self._refuse(k, f"no run can answer this job: {e}")
+            return None
+        return job
+
+    def _prepare(self, key, j) -> dict:
+        """Fetch, check and run the job; save what the commit and the reveal need."""
+        k = str(key)
+        job = self._check(k, j)
+        if job is None:
+            return self.state.get(k)
         res = run(job, str(self.owner.pubkey()), self.models, self.skip_layer,
                   job_key=bytes(key))
         r = res.receipt

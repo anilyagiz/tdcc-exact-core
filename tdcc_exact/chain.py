@@ -9,6 +9,10 @@ named after an instruction sends one transaction and returns its signature (`ope
 accounts and send nothing. `link(sig)` is a signature's Solana Explorer page
 (`link(key, "address")` an account's).
 
+A job opened with `open_job` is Offered: its provider takes it on with `accept_job` (then it
+is Open and the provider commits as before), or lets it lapse and the renter `cancel_job`s it
+after its accept deadline.
+
 Keypairs live outside the repository, in ~/.config/tdcc-exact/<cluster>/<name>.json, created on
 first use. On devnet the admin is funded by an airdrop (or by hand at faucet.solana.com) and
 funds the others.
@@ -49,7 +53,9 @@ RPC = {"devnet": "https://api.devnet.solana.com", "localnet": "http://127.0.0.1:
 DECIMALS = 6
 MINT_SIZE = 82
 
-STATES = ["Open", "Committed", "Revealed", "Challenged", "Settled", "Slashed", "Expired"]
+# the program's JobState, in its order (u8 codes); Offered: opened, not yet accepted
+STATES = ["Open", "Committed", "Revealed", "Challenged", "Settled", "Slashed", "Expired",
+          "Offered"]
 
 
 class ChainError(RuntimeError):
@@ -243,6 +249,7 @@ class JobAccount:
     challenge_slot: int
     ruling_deadline: int
     answer: int                  # 0 NO, 1 YES, 255 not revealed yet
+    accept_deadline: int = 0     # the last slot the provider may accept an Offered job
 
     @staticmethod
     def decode(d: bytes) -> "JobAccount":
@@ -265,9 +272,11 @@ class JobAccount:
         verifier, vfp = pk(), take(32)
         bond, chs, rul = q(), q(), q()
         answer = take(1)[0]
+        take(1)                                            # bump
+        accept = q()
         return JobAccount(config, renter, provider, job_id, digest, model, price, state,
                           opened, cd, rd, chd, commitment, fp, root, cps, verifier, vfp, bond,
-                          chs, rul, answer)
+                          chs, rul, answer, accept)
 
 
 @dataclass
@@ -348,7 +357,7 @@ class Params:
 
     @property
     def job_life(self) -> int:
-        """Slots from open_job to the last moment a challenge can be ruled; the program wants
+        """Slots from accept_job to the last moment a challenge can be ruled; the program wants
         unstake_cooldown > this, so no stake leaves before a pending ruling."""
         return 2 * self.commit_window + self.challenge_window + self.arbiter_window
 
@@ -490,15 +499,18 @@ class Market:
     def open_job(self, renter: Keypair, provider: Pubkey, job_id: int, job_digest: bytes,
                  model_hash: bytes, price: int,
                  commit_deadline: int = 0) -> tuple[Pubkey, str]:
-        """Escrow `price` for a job with `provider`. commit_deadline: 0 for commit_window
-        slots from now, or an absolute slot within that (one deadline for a fan-out)."""
+        """Escrow `price` for a job offered to `provider`: the job is Offered until the provider
+        accepts it (accept_job, by the job's accept_deadline: commit_window slots from now, or
+        commit_deadline), else the renter cancels it (cancel_job) and takes the escrow back.
+        commit_deadline: 0 for commit_window slots from the acceptance, or an absolute slot
+        at most commit_window from now (one deadline for a fan-out)."""
         r = renter.pubkey()
         job = self.job_pda(r, job_id)
         data = (u64(job_id) + b32(job_digest) + b32(model_hash) + u64(price)
                 + u64(commit_deadline))
         sig = self.rpc.send([self._ix("open_job",
                                       [S(r, True), R(self.config),
-                                       W(self.provider_pda(provider)), W(job), R(self.mint),
+                                       R(self.provider_pda(provider)), W(job), R(self.mint),
                                        W(ata(r, self.mint)), W(self.vault), R(TOKEN_PROGRAM),
                                        R(SYSTEM_PROGRAM)], data)], renter)
         return job, sig
@@ -508,6 +520,25 @@ class Market:
         if d is None:
             raise ChainError(f"no job account {job}")
         return JobAccount.decode(d)
+
+    def accept_ix(self, owner: Pubkey, job: Pubkey) -> Instruction:
+        return self._ix("accept_job",
+                        [S(owner), R(self.config), W(job), W(self.provider_pda(owner))])
+
+    def accept_job(self, owner: Keypair, job: Pubkey) -> str:
+        """The job's provider takes the Offered job on (by its accept_deadline): it turns Open,
+        its commit deadline is fixed and the provider's stake is locked until it ends."""
+        return self.rpc.send([self.accept_ix(owner.pubkey(), job)], owner)
+
+    def cancel_ix(self, renter: Pubkey, job: Pubkey) -> Instruction:
+        return self._ix("cancel_job",
+                        [S(renter), R(self.config), W(job), R(self.mint), W(self.vault),
+                         W(ata(renter, self.mint)), R(TOKEN_PROGRAM)])
+
+    def cancel_job(self, renter: Keypair, job: Pubkey) -> str:
+        """The renter takes back the escrow of a job its provider did not accept by the accept
+        deadline (no penalty); the job ends Expired."""
+        return self.rpc.send([self.cancel_ix(renter.pubkey(), job)], renter)
 
     def commit_receipt(self, owner: Keypair, job: Pubkey, commitment: bytes) -> str:
         return self.rpc.send([self._ix("commit_receipt",

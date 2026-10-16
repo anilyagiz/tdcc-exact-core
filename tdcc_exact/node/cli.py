@@ -1,4 +1,5 @@
-"""`tdcc-exact node provider|verifier|arbiter|store|publish`: the market's off-chain services.
+"""`tdcc-exact node provider|verifier|arbiter|settler|store|publish`: the market's off-chain
+services.
 
     tdcc-exact node store    --dir ~/tdcc-store [--host 0.0.0.0 --port 8787] [--retention 30d]
     tdcc-exact node gc       --dir ~/tdcc-store --retention 30d [--pins FILE] [--dry-run]
@@ -6,11 +7,14 @@
     tdcc-exact node provider --rpc URL --keys DIR --store http://host:8787 [--once]
     tdcc-exact node verifier --rpc URL --keys DIR --store http://host:8787 [--rate 0.2] [--once]
     tdcc-exact node arbiter  --rpc URL --keys DIR --store http://host:8787 [--once]
+    tdcc-exact node settler  --rpc URL --keys DIR [--name renter] [--no-close] [--once]
 
 --keys DIR holds Solana keypair files: the node's own (<name>.json, `provider` or `verifier`
 by default, created on first use) and, unless --admin names the market's admin public key,
 admin.json (the market is the config PDA seeded by the admin's key). The arbiter signs with
 KEYS/arbiter.json, or admin.json when there is none; it must be the market's Config.arbiter.
+The settler (settler.py) may run under any key with SOL for the fees; under a renter's key
+(--name) it also cancels that renter's lapsed offers.
 """
 from __future__ import annotations
 
@@ -93,6 +97,12 @@ def cmd_node(a) -> int:
         if a.once:
             print(node.run_once(wait=True))
             return 0
+    elif a.role == "settler":
+        from .settler import SettlerNode
+        node = SettlerNode(chain, owner, close=not a.no_close)
+        if a.once:
+            print(node.run_once())
+            return 0
     elif a.role == "arbiter":
         from .arbiter import ArbiterNode, NotArbiter
         try:
@@ -120,10 +130,12 @@ def cmd_node(a) -> int:
 
 
 def add_parser(sub) -> argparse.ArgumentParser:
-    n = sub.add_parser("node", help="run a market service: job store, provider, verifier or arbiter",
+    n = sub.add_parser("node", help="run a market service: job store, provider, verifier, "
+                                    "arbiter or settler",
                        description=__doc__,
                        formatter_class=argparse.RawDescriptionHelpFormatter)
-    n.add_argument("role", choices=["provider", "verifier", "arbiter", "store", "gc", "publish"])
+    n.add_argument("role", choices=["provider", "verifier", "arbiter", "settler", "store", "gc",
+                                    "publish"])
     n.add_argument("--rpc", default="http://127.0.0.1:8899", help="Solana RPC URL")
     n.add_argument("--cluster", default="localnet", help="for Explorer links only")
     n.add_argument("--keys", help="keypair directory (the node's key, admin.json)")
@@ -151,6 +163,9 @@ def add_parser(sub) -> argparse.ArgumentParser:
     n.add_argument("--window-grace", type=int,
                    help="arbiter: slots after a challenge to wait for the provider's window "
                         "(default: half the ruling window)")
+    n.add_argument("--no-close", action="store_true",
+                   help="settler: leave finished jobs' accounts open (default: close them, "
+                        "the rent back to the renter)")
     n.add_argument("--once", action="store_true", help="one pass, then exit")
     n.add_argument("--poll", type=float, default=2.0, help="seconds between passes")
     n.add_argument("--dir", default="tdcc-store", help="store: where the blobs go")
