@@ -22,7 +22,7 @@ It runs on a Kintex-7 FPGA PCIe card (Inspur YPCB-00338). **Honest status:** the
 (trace log, fingerprint, dispute) runs on the bit-exact simulator today; the trace log in
 hardware and its speed on the card are not built or measured yet. The Solana program is
 **unaudited and on devnet only**, with a test USDC mint, and an arbiter key decides challenges
-until the on-chain bisection game lands ([SECURITY.md](SECURITY.md), [TODO.md](TODO.md)).
+until the on-chain bisection game lands ([SECURITY.md](SECURITY.md), [TODO.md](TODO.md)). [ROADMAP.md](ROADMAP.md) says what comes next, and [docs/architecture.md](docs/architecture.md) how the pieces fit.
 
 ## How TDCC Exact works
 
