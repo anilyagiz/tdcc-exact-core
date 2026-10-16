@@ -3,7 +3,7 @@
 Chain wraps a chain.Market: listing Job accounts (getProgramAccounts filtered by the account
 discriminator, the market's config and, for a provider, the provider field), the slot, the
 market's arbiter key, a job's ReceiptRevealed event, and the instructions a node sends
-(commit_receipt, reveal_receipt, challenge; the arbiter's slash and dismiss).
+(accept_job, commit_receipt, reveal_receipt, challenge; the arbiter's slash and dismiss).
 
 The Job account's layout (programs/tdcc_exact, `pub struct Job`): an 8-byte discriminator,
 then config, renter, provider (32 bytes each), ... so the memcmp offsets of the fields the
@@ -115,6 +115,10 @@ class Chain:
         return None
 
     # ------------------------------------------------------------------ writes
+    def accept(self, owner, job) -> str:
+        """The provider takes an Offered job on (it turns Open; the commit deadline starts)."""
+        return self.m.accept_job(owner, job)
+
     def commit(self, owner, job, commitment: bytes) -> str:
         return self.m.commit_receipt(owner, job, commitment)
 

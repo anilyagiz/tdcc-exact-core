@@ -171,13 +171,29 @@ class FakeChain:
     def slot(self):
         return self.now
 
-    def open(self, key, provider, job_digest, model_hash, window=10):
+    def open(self, key, provider, job_digest, model_hash, window=10, offered=False):
+        """An Open job (as if accepted already), or with offered=True an Offered one."""
         from types import SimpleNamespace
+        self.window = window
         self.jobs_[key] = SimpleNamespace(
-            provider=provider, job_digest=job_digest, model_hash=model_hash, state="Open",
-            opened_slot=self.now, commit_deadline=self.now + window,
-            reveal_deadline=self.now + 2 * window, challenge_deadline=0,
+            provider=provider, job_digest=job_digest, model_hash=model_hash,
+            state="Offered" if offered else "Open", opened_slot=self.now,
+            accept_deadline=self.now + window,
+            commit_deadline=0 if offered else self.now + window,
+            reveal_deadline=0 if offered else self.now + 2 * window, challenge_deadline=0,
             commitment=bytes(32), fingerprint=bytes(32), trace_root=bytes(32), checkpoints=0)
+
+    def job(self, key):
+        return self.jobs_[key]
+
+    def accept(self, owner, key):
+        j = self.jobs_[key]
+        assert j.state == "Offered" and self.now <= j.accept_deadline
+        assert owner.pubkey() == j.provider
+        j.state, j.commit_deadline = "Open", self.now + self.window
+        j.reveal_deadline = j.commit_deadline + self.window
+        self.sent.append(("accept", key))
+        return f"sig-accept-{len(self.sent)}"
 
     def jobs(self, provider=None, states=None):
         return [(k, j) for k, j in sorted(self.jobs_.items(), key=lambda x: str(x[0]))
@@ -309,6 +325,42 @@ def test_provider_waits_for_an_unpublished_job_then_misses_it(fake, job):
     assert c.sent == []
 
 
+def test_provider_accepts_an_offer_then_commits(fake, job):
+    f, c = fake, fake["chain"]
+    f["store"].put_job(job)
+    c.open(J1, f["provider"].pubkey(), job.digest, f["model_hash"], offered=True)
+    c.now += 3                                     # a late acceptance: the window runs from it
+    p = _provider(f)
+    assert p.run_once() == {"J1": "committed"}
+    assert [s for s, _ in c.sent] == ["accept", "commit"]
+    assert c.jobs_[J1].commit_deadline == 113 and p.state.get("J1")["accept_sig"]
+    assert _provider(f).run_once(wait=True) == {"J1": "published"}
+    assert [s for s, _ in c.sent] == ["accept", "commit", "reveal"]
+
+
+def test_provider_does_not_accept_an_offer_it_refuses(fake, job):
+    """An offer naming a model hash that is not the registry's is never accepted: the job
+    stays Offered (nothing of the stake locked) for the renter to cancel."""
+    f, c = fake, fake["chain"]
+    f["store"].put_job(job)
+    c.open(J1, f["provider"].pubkey(), job.digest, bytes([9]) * 32, offered=True)
+    p = _provider(f)
+    assert p.run_once(wait=True) == {"J1": "refused"}
+    assert "registered" in p.state.get("J1")["why"]
+    assert c.sent == [] and c.jobs_[J1].state == "Offered"
+    assert _provider(f).run_once() == {}
+
+
+def test_provider_misses_an_offer_past_its_accept_deadline(fake, job):
+    f, c = fake, fake["chain"]
+    c.open(J1, f["provider"].pubkey(), job.digest, f["model_hash"], offered=True)
+    assert _provider(f).run_once() == {}           # the job is not in the store yet
+    f["store"].put_job(job)
+    c.now += 11
+    assert _provider(f).run_once() == {"J1": "missed"}
+    assert c.sent == []
+
+
 def test_verifier_challenges_a_skipped_layer(fake, job):
     f, c = fake, fake["chain"]
     f["store"].put_job(job)
@@ -393,7 +445,7 @@ def test_nodes_on_a_validator(tmp_path, job):
     sa = json.loads((keys / "provider.state" / "state.json").read_text())
     assert sa[str(ja)]["status"] == "published" and sa[str(jx)]["status"] == "refused"
     assert m.job(ja).state == "Revealed" and m.job(jb).state == "Revealed"
-    assert m.job(jx).state == "Open"
+    assert m.job(jx).state == "Offered"              # refused: never accepted
     assert store.get_trace(m.job(ja).trace_root)["root"] == m.job(ja).trace_root.hex()
 
     # a restarted A does nothing more

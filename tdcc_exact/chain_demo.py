@@ -1,6 +1,7 @@
 """`tdcc-exact demo --devnet` (or --localnet): the demo's five steps, each a Solana transaction.
 
-    1. the renter opens two jobs (to provider A and provider B), its USDC into escrow
+    1. the renter opens two jobs (offered to provider A and provider B), its USDC into
+       escrow; each provider accepts its own (no job binds a provider before it accepts)
     2. A runs honestly, B skips a layer; both commit, then reveal their receipts
     3. a verifier re-runs the job and challenges B's receipt (putting up the challenge bond)
     4. the bisection names B's first wrong instruction; the arbiter slashes B on-chain (the
@@ -84,6 +85,9 @@ def run(a) -> int:
                                deadline)
         jobs[name] = acct
         say(f"   job {name}: {link(str(acct), 'address')}\n   open_job: {link(sig)}")
+    for name, p in (("A", pa), ("B", pb)):                # each provider takes its job on
+        sig = m.accept_job(p, jobs[name])
+        say(f"   {name} accepts: {link(sig)}")
 
     # ------------------------------------------------------------------ 2. runs, receipts
     L = layers_of(model[0])
