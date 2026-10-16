@@ -55,6 +55,8 @@ on the simulator); numbers in docs/exact.md sections 5 and 6.
       oracle is right (not just reproducible).
 - [ ] The model answers Yes to every question with this prompt (3 of 7 right, docs/exact.md
       section 8): a larger model, or a calibrated Yes - No threshold, before a real oracle.
+      The evaluation tool and 64 labelled questions are ready (tools/oracle_eval.py,
+      docs/oracle-quality.md); it needs a run on a machine that can download the model.
 
 ### 4. Security fixes before anyone else sees the protocol
 - [x] **Copy attack.** (commit-reveal, tdcc_exact/commit.py and the program) Honest runs post the same fingerprint, so a lazy provider can copy
@@ -85,8 +87,10 @@ on the simulator); numbers in docs/exact.md sections 5 and 6.
 Today both sides of a dispute are replayed locally, and the provider's replay is told which
 shortcut it took (`--replay-skip-layer`). In a market the provider must reveal its own steps.
 - [ ] Data availability: the provider stores its full checkpoint list (and can replay any
-      window) for the challenge period; upload the checkpoint list to IPFS / Arweave / a
-      TDCC bucket, put its hash on-chain with the receipt.
+      window) for the challenge period. Done in part: the job and trace store
+      (tdcc_exact/node/store.py, content-addressed, every read checked) and the provider node
+      publishes its trace; the trace root is on-chain with the receipt. Open: replication
+      (IPFS / Arweave / a TDCC bucket) and a deadline after which a missing trace loses.
 - [ ] Reveal API on the provider node: `GET /jobs/{id}/window?lo=&hi=` returns the step
       records; a provider that does not answer within the deadline loses by default.
 - [ ] On-chain bisection game (the Merkle proofs it needs: `trace.merkle_proof` /
@@ -99,9 +103,14 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
       (simpler, weaker trust); (c) optimistic: the challenger posts the honest window and
       anyone can counter-challenge. Pick one and write it down in docs/exact.md.
 - [ ] Merkle-ize the state hash (TMEM pages, ACT rows) if (a) is chosen.
-- [ ] DRAM writes are not in the state hash: stores are caught when the data is loaded
+- [x] DRAM writes are not in the state hash: stores are caught when the data is loaded
       back. A run whose last stores are wrong (the logits area) is caught only by the
       logits hash. Hash the regions a run stores (ST / QST targets) into the chain.
+      (Each slice's state includes a running hash of its ST / QST / DSTEP writes, and the
+      host's read of the logits is in the chain.)
+- [x] A provider's revealed window is checked against its posted checkpoints
+      (`dispute.verify_window`), and a receipt that its own trace does not give is an output
+      fault.
 
 ### 7. Verifier incentives
 - [ ] Verifier's dilemma: if nobody cheats, verifiers earn nothing and stop checking.
@@ -109,15 +118,23 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
       reward for catching them.
 - [ ] Verifier selection: random (VRF / slot hash), so a provider cannot collude with "its"
       verifier.
-- [ ] Rate limits on challenges: a challenge bond, lost when the challenge is wrong.
-- [ ] A deadline for the arbiter: a challenged job holds its escrow and its provider's stake
+- [x] Rate limits on challenges: a challenge bond, lost when the challenge is wrong.
+- [x] A deadline for the arbiter: a challenged job holds its escrow and its provider's stake
       until `slash` or `dismiss`; after the deadline anyone could dismiss. Needs a new field
       in `Config` (an account layout change: a new market, or a migration).
+- [x] The arbiter is a key of its own, rotatable by the admin (`set_arbiter`), and may not
+      challenge.
 
 ### 8. Services
-- [ ] Provider node daemon: watches the chain for jobs, runs them on the card or the
+- [x] Provider node daemon: watches the chain for jobs, runs them on the card or the
       simulator, posts receipts, serves reveals, keeps traces for the challenge window.
-- [ ] Verifier node: samples jobs, re-runs on a laptop, challenges, runs the bisection.
+      (`tdcc-exact node provider`; serving reveal windows is still open, item 6.)
+- [x] Verifier node: samples jobs, re-runs on a laptop, challenges, runs the bisection.
+      (`tdcc-exact node verifier`; the bisection stays with the arbiter for now.)
+- [x] An indexer: the program's events and accounts as a market snapshot
+      (`tdcc-exact market status|events`).
+- [ ] An arbiter service: watches Challenged, fetches the provider's trace from the store,
+      runs the dispute, signs slash or dismiss.
 - [ ] Renter API: "one API, like any GPU platform": HTTP endpoint that opens a job and
       returns the answer; payment per token in USDC from a wallet or over HTTP with x402.
 - [x] More cheat scenarios in tests: a smaller model substituted, fp4 instead of int8,
