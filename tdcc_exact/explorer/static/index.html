@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>TDCC Exact Market</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>TDCC Exact market</h1>
+    <p class="sub" id="where">Connecting&hellip;</p>
+  </div>
+  <div class="controls">
+    <label><input type="checkbox" id="auto" checked> Auto-refresh</label>
+    <button type="button" id="refresh">Refresh</button>
+  </div>
+</header>
+<p id="status" class="status" role="status" aria-live="polite"></p>
+
+<main>
+  <section aria-labelledby="h-summary">
+    <h2 id="h-summary">Summary</h2>
+    <dl class="tiles" id="summary"></dl>
+  </section>
+
+  <section aria-labelledby="h-jobs">
+    <h2 id="h-jobs">Jobs</h2>
+    <div class="filter">
+      <label for="state-filter">State</label>
+      <select id="state-filter">
+        <option value="">All</option>
+        <option value="live">Live (escrow locked)</option>
+        <option value="late">Past a deadline</option>
+        <option>Open</option><option>Committed</option><option>Revealed</option>
+        <option>Challenged</option><option>Settled</option><option>Slashed</option>
+        <option>Expired</option>
+      </select>
+    </div>
+    <div class="scroll" role="region" aria-labelledby="h-jobs" tabindex="0">
+      <table id="jobs">
+        <caption class="vh">Jobs, newest first</caption>
+        <thead><tr>
+          <th scope="col">Job</th><th scope="col">State</th><th scope="col">Renter</th>
+          <th scope="col">Provider</th><th scope="col" class="num">Price</th>
+          <th scope="col">Next deadline</th><th scope="col">Result</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-providers">
+    <h2 id="h-providers">Providers</h2>
+    <div class="scroll" role="region" aria-labelledby="h-providers" tabindex="0">
+      <table id="providers">
+        <caption class="vh">Providers by stake</caption>
+        <thead><tr>
+          <th scope="col">Provider</th><th scope="col" class="num">Stake</th>
+          <th scope="col" class="num">Open jobs</th><th scope="col">Unstaking</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-events">
+    <h2 id="h-events">Recent events</h2>
+    <div class="scroll" role="region" aria-labelledby="h-events" tabindex="0">
+      <table id="events">
+        <caption class="vh">Program events, newest first</caption>
+        <thead><tr>
+          <th scope="col">Slot</th><th scope="col">Event</th><th scope="col">Details</th>
+          <th scope="col">Transaction</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<footer><p>Times are approximate (slots &times; <span id="slot-s">0.4</span> s). Data from the program's accounts and logs via the RPC node.</p></footer>
+</body>
+</html>
