@@ -1,5 +1,5 @@
-"""The off-chain half of the market: a job store, a provider node, a verifier node and an
-arbiter node.
+"""The off-chain half of the market: a job store, a provider node, a verifier node, an
+arbiter node and a settler node.
 
 The chain keeps only a job's digest; the job itself (its model, prompt ids, answer tokens)
 travels through the store (store.py), keyed by that digest, and each fetch is checked against
@@ -9,6 +9,14 @@ the key. Providers publish their traces there too (keyed by trace root) for data
     tdcc-exact node provider --rpc URL --keys DIR --store http://host:8787 [--once]
     tdcc-exact node verifier --rpc URL --keys DIR --store http://host:8787 [--once]
     tdcc-exact node arbiter  --rpc URL --keys DIR --store http://host:8787 [--once]
+    tdcc-exact node settler  --rpc URL --keys DIR [--name renter] [--no-close] [--once]
+
+The provider accepts (accept_job) only the Offered jobs it will run, after checking them, so
+an offer it refuses locks none of its stake. The settler (settler.py) needs no store: it
+settles revealed jobs past their challenge deadline, expires jobs past their reveal deadline,
+cancels lapsed offers (only the renter's own, so a renter runs it under its key with --name)
+and closes finished jobs (unless --no-close). The verifier samples jobs by a hash of the job
+and its own secret key, so no provider can tell in advance which of its jobs are re-run.
 
 The nodes reach the chain only through chainio.py, so a change to the program's accounts or
 instructions is one file to adapt.
