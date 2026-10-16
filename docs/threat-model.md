@@ -16,15 +16,15 @@ open; a market with real funds needs them closed or accepted in writing first
 | Escrow | the renters' prices, in the market's vault | a renter pays for work not done, or a provider is not paid for work done |
 | Stakes | the providers' USDC, in the same vault | an honest provider is slashed, or a cheater keeps its stake |
 | Verdict integrity | the fingerprint, the trace root, the dispute's result, the arbiter's ruling | a wrong answer is paid as right, or a right one is slashed as wrong |
-| Liveness | jobs moving to a final state within their windows | escrow and stakes held without end |
+| Liveness | jobs moving to a final state within their windows (anyone may settle, expire and close; the settler node does it) | escrow and stakes held without end |
 | Keys | the admin (arbiter) key, the upgrade authority, provider and renter keys | depends on the key (see the table) |
 
 ## Actors
 
 | Actor | Can | Wants |
 |:--|:--|:--|
-| Renter | open jobs against any staked provider, pick the job's parameters and price, challenge (any key but the provider) | a correct answer, or its money back |
-| Provider | run jobs, commit and reveal receipts, post or withhold its checkpoint list, stake and unstake | the price for as little work as it can get away with |
+| Renter | offer jobs to any staked provider (which takes one on only by accepting it), pick the job's parameters and price, cancel its own offers that lapse, challenge (any key but the provider) | a correct answer, or its money back |
+| Provider | accept or ignore the jobs offered to it, run them, commit and reveal receipts, post or withhold its checkpoint list, stake and unstake | the price for as little work as it can get away with |
 | Verifier | re-run jobs, challenge with another fingerprint, play the dispute | the slashed stake's verifier share |
 | Arbiter | sign `slash` or `dismiss` on a challenged job, before its ruling deadline; may not challenge | today: TDCC, assumed honest |
 | Admin | seeds the market; rotates the arbiter (`set_arbiter`) | keep the market running |
@@ -37,11 +37,14 @@ open; a market with real funds needs them closed or accepted in writing first
 1. **The simulator is the card, bit for bit.** A verifier's laptop re-runs a job on the ISA
    simulator and compares fingerprints with a provider that may have run on the card. Upstream
    openTPU checks this (README, "Validating against Hugging Face"). If the card and the
-   simulator drift, an honest card provider is challenged. The trace log itself exists only in
-   the simulator today ([TODO.md](../TODO.md) item 10).
+   simulator drift, an honest card provider is challenged. The trace log runs only in the
+   simulator today: its hash chain exists in RTL (`rtl/exact/`, [exact-rtl.md](exact-rtl.md)),
+   simulated against `trace.py`, but is not in the card's design yet ([TODO.md](../TODO.md)
+   item 10).
 2. **SHA-256 is collision and preimage resistant.** Every chain step, checkpoint leaf, Merkle
    node, fingerprint and commitment is SHA-256.
-3. **The arbiter is honest and live.** Today the market's admin key decides every challenge.
+3. **The arbiter is honest and live.** Today the market's arbiter key (the admin's unless set)
+   decides every challenge.
    The program checks the arbiter's signature and that the divergence index is within the
    posted checkpoint count, nothing more. Replacing it is [TODO.md](../TODO.md) item 6.
 4. **The model registry is right.** `tdcc_exact/models.json` pins the image hash a correct
@@ -69,13 +72,14 @@ branch.
 | Griefing with challenges | Anyone (the renter too) challenges honest receipts with a random fingerprint. It costs a transaction fee, holds the job until the arbiter rules, and loads the arbiter. | A challenge posts `challenge_bond`; a dismissed challenge pays the bond to the provider. | done (program); the bond's size is a market parameter |
 | Arbiter withholding | The arbiter never rules: a `Challenged` job holds its escrow and its provider's open-job count (so its whole stake) without end. | A ruling deadline (`arbiter_window` slots after the challenge) after which anyone can dismiss; the receipt then stands and the bond goes to the provider. | done (program) |
 | Arbiter bias | The arbiter slashes an honest provider, or dismisses a valid challenge. | None on-chain today. The `Slashed` event names the divergence index and fault step, so anyone can re-run the window and check the ruling after the fact. The on-chain bisection game removes the arbiter. | open ([TODO.md](../TODO.md) item 6) |
-| Verifier collusion and selection | A provider runs its own verifier, which never challenges it; a cartel challenges only outsiders. | Anyone may challenge, so one honest verifier is enough. Random verifier selection (VRF or slot hash) is not built. | open ([TODO.md](../TODO.md) item 7) |
-| Verifier's dilemma | If nobody cheats, verifying earns nothing, verifiers stop, and then cheating pays. | Random audits paid from the fee, or planted faulty jobs with a reward. Not built. | open ([TODO.md](../TODO.md) item 7) |
+| Verifier collusion and selection | A provider runs its own verifier, which never challenges it; a cartel challenges only outsiders. | Anyone may challenge, so one honest verifier is enough. Random verifier selection (VRF or slot hash) is not built ([design/verifier-incentives.md](design/verifier-incentives.md) proposes one). | open ([TODO.md](../TODO.md) item 7) |
+| Predictable sampling | A verifier re-runs only a share of the jobs (`--rate`). If the sample is computable from public data, a provider learns before it runs which of its jobs no verifier will check, and cheats on those alone. | The verifier node picks its sample by `H(tag, job, its secret key's seed)`: different for each verifier, the same across its restarts, and unknown to anyone else. | done (verifier node): `test_the_verifiers_sample_cannot_be_computed_from_public_keys` |
+| Verifier's dilemma | If nobody cheats, verifying earns nothing, verifiers stop, and then cheating pays. | Random audits paid from the fee, or planted faulty jobs with a reward. Not built; [design/verifier-incentives.md](design/verifier-incentives.md) works through the options. | open ([TODO.md](../TODO.md) item 7) |
 | Data withholding | The provider reveals a trace root but will not hand over its checkpoint list or replay a window. | Off-chain, a provider whose list does not match its root loses the dispute, and a revealed window must chain to the posted checkpoints (`dispute.verify_window`). The job and trace store (`tdcc_exact/node/store.py`) holds providers' traces, checked against their roots. Not yet: replication, and a deadline after which a missing trace loses. | partial |
 | DRAM-store-only corruption | The checkpoint state hash covers TMEM and ACT RAM, not DRAM. A wrong value stored to DRAM is caught when it is loaded back, but a run's last stores (the logits area) are caught only by the logits hash in the fingerprint, and the dispute cannot name the instruction. | Each slice's state includes a running hash of what its ST, QST and DSTEP instructions wrote to DRAM, and the host's read of the logits is in the chain. | done: `tests/test_exact.py` |
-| Job description mismatch | The renter gives the provider a job JSON whose digest is not the one on-chain, and challenges the receipt with a run of the on-chain job. | The provider node refuses to commit unless the job it fetched hashes to the on-chain digest and the on-chain model hash is the registry's pin (`tdcc_exact/node/provider.py`); the job then expires at no cost to it. | done (provider node) |
+| Job description mismatch | The renter gives the provider a job JSON whose digest is not the one on-chain, and challenges the receipt with a run of the on-chain job. | The provider node accepts (and later commits) only a job it fetched that hashes to the on-chain digest and whose on-chain model hash is the registry's pin (`tdcc_exact/node/provider.py`); an offer it refuses is never accepted, locks none of its stake, and lapses back to the renter (`cancel_job`). | done (provider node): `test_provider_does_not_accept_an_offer_it_refuses` |
 | Front-running unstake | A provider that expects a challenge withdraws its stake first. | `unstake` needs no open jobs, and `initialize` requires the unstake cooldown to outlast a job (commit, reveal, challenge and ruling windows), so a provider cannot leave before a challenge against it is ruled. | done (program) |
-| Free jobs locking stake | A renter opens jobs against a provider to hold its stake (an open job blocks unstaking). | `open_job` refuses a price of 0, and `expire` frees a job after its reveal deadline. A job costs at least one base unit, and the provider does not sign `open_job`, so a renter can still hold a provider's stake for a small price per window. | partial: `test_a_job_must_pay_something` |
+| Unwanted jobs locking stake | A renter opens jobs against a provider to hold its stake (an open job blocks unstaking) or to have it slashed on a job it never agreed to. | Provider consent: `open_job` only offers the job (`Offered`); it counts in the provider's open jobs, and binds the provider to anything, only once the provider signs `accept_job` before the accept deadline. An offer left alone costs the provider nothing and goes back to the renter with `cancel_job`. `open_job` also refuses a price of 0. | done (program): `test_offers_do_not_lock_the_stake`, `test_an_offer_binds_the_provider_only_once_accepted`, `test_a_job_must_pay_something` |
 | Withheld reveal | A provider commits, then withholds its reveal (it dislikes the answer, or is being watched) and lets the job expire. | `expire` pays the renter `non_reveal_penalty` out of the stake of a provider that committed and did not reveal. | done (program) |
 | One stake behind many jobs | `slash` takes the provider's whole stake; a second challenged job of the same provider then slashes 0, and the verifier earns nothing. | `reveal_receipt` requires the provider to hold at least the minimum stake, so after one slash its other jobs cannot be revealed and expire back to their renters. A per-job stake would be stronger. | partial |
 | Key theft: arbiter or admin | The arbiter key signs every ruling: with it, an attacker dismisses valid challenges or slashes honest providers (it cannot challenge, so it cannot collect a verifier's share from its own rulings). The admin key seeds the market and can appoint a new arbiter. | The arbiter is a key of its own, rotatable by the admin with `set_arbiter` (a stolen arbiter key is replaced at once), and may be a multisig; keep the admin key offline. The on-chain game removes the arbiter. | partial ([operations.md](operations.md#keys)) |
