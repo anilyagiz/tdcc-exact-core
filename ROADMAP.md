@@ -19,7 +19,7 @@ Windows):
   revealed parts, a penalty for a withheld reveal, a cooldown that outlasts a job, closing of
   finished jobs, an event for every state change.
 - **Services.** A content-addressed job and trace store, a provider node, a verifier node, an
-  indexer and a market status command.
+  arbiter node, an indexer and a market status command.
 - **Project.** A library API, CI and lint, a release workflow, security policy, architecture,
   threat model, glossary and operations docs.
 
@@ -33,8 +33,9 @@ slashed with no manual step.
 
 - Deploy the current program to devnet as a new market (its accounts changed). **owner**: the
   upgrade authority; if the old deploy's authority is lost, a new program id.
-- An arbiter service: watches `Challenged`, fetches the provider's trace from the store, runs
-  the dispute, signs `slash` or `dismiss` within `arbiter_window`.
+- Done: an arbiter service (`tdcc-exact node arbiter`) that rules on challenges within
+  `arbiter_window`. Left: once providers serve their windows, slash on a named fault (or a
+  window that does not chain) instead of on the bisection alone.
 - A reveal API on the provider node (`GET /jobs/{id}/window`) and a deadline after which a
   provider that does not serve its window loses.
 - A renter SDK: open a job, publish it to the store, wait for the answer.

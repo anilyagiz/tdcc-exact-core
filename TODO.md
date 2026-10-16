@@ -133,8 +133,9 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
       (`tdcc-exact node verifier`; the bisection stays with the arbiter for now.)
 - [x] An indexer: the program's events and accounts as a market snapshot
       (`tdcc-exact market status|events`).
-- [ ] An arbiter service: watches Challenged, fetches the provider's trace from the store,
-      runs the dispute, signs slash or dismiss.
+- [x] An arbiter service: watches Challenged, fetches the provider's trace from the store,
+      runs the dispute, signs slash or dismiss. (`tdcc-exact node arbiter`; it slashes on the
+      bisection alone until providers serve their windows, see the reveal API in item 6.)
 - [ ] Renter API: "one API, like any GPU platform": HTTP endpoint that opens a job and
       returns the answer; payment per token in USDC from a wallet or over HTTP with x402.
 - [x] More cheat scenarios in tests: a smaller model substituted, fp4 instead of int8,
