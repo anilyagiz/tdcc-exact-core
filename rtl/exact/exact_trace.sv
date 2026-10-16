@@ -133,18 +133,21 @@ module exact_trace #(
 
   // the messages (chain first; bytes after the message's end are don't-care)
   logic [MB*8-1:0] m_step, m_aux, m_init;
-  always_comb begin
-    logic [511:0] rb, pb;
-    logic [255:0] wb, bb;
-    for (int k = 0; k < 16; k++) rb[511 - 32 * k -: 32] = bswap(head[32 * k +: 32]);
-    for (int k = 0; k < 8; k++) wb[255 - 32 * k -: 32] = bswap(head[512 + 32 * k +: 32]);
-    for (int k = 0; k < 16; k++) pb[511 - 32 * k -: 32] = bswap(aux[k]);
-    for (int k = 0; k < 8; k++) bb[255 - 32 * k -: 32] = bswap(binding[k]);
-    // head = {slice, pc, ir, regs}
-    m_step = {chain, head[FW-9 -: 8], head[FW-1 -: 8], bswap(head[FW-17 -: 32]), wb, rb, 16'h0};
-    m_aux  = {chain, aux_kind[7:0], pb, 312'h0};
-    m_init = {TAG, bb, 680'h0};
+  logic [511:0]    rb, pb;          // R0..R15 and the payload as byte strings
+  logic [255:0]    wb, bb;          // the instruction's words and the binding
+  for (genvar k = 0; k < 16; k++) begin : g_w16
+    assign rb[511 - 32 * k -: 32] = bswap(head[32 * k +: 32]);
+    assign pb[511 - 32 * k -: 32] = bswap(aux[k]);
   end
+  for (genvar k = 0; k < 8; k++) begin : g_w8
+    assign wb[255 - 32 * k -: 32] = bswap(head[512 + 32 * k +: 32]);
+    assign bb[255 - 32 * k -: 32] = bswap(binding[k]);
+  end
+  // head = {slice, pc, ir, regs}
+  assign m_step = {chain, head[FW-9 -: 8], head[FW-1 -: 8], bswap(head[FW-17 -: 32]), wb, rb,
+                   16'h0};
+  assign m_aux  = {chain, aux_kind[7:0], pb, 312'h0};
+  assign m_init = {TAG, bb, 680'h0};
 
   always_ff @(posedge clk) begin
     upd <= 1'b0;
