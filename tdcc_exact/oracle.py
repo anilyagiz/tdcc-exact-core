@@ -19,14 +19,15 @@ fingerprints, and a fingerprint revealed on one is no use on the other. A verifi
 with the binding of the on-chain job, never one a receipt claims. The job also carries a
 random nonce (new_job) in its digest, so two jobs' digests differ too.
 
-A job of kind "generate" (docs/exact.md, section 2) asks for text instead: the prompt is
-prefilled, then up to `max_tokens` tokens are decoded greedily, each one a device run in the
-same trace, stopping at a token in `stop_ids`. Greedy means the argmax of the logits the trace
-committed to (TraceLog.host_read), ties to the lowest token id, so every honest run picks the
-same tokens. The answer is the token ids (answer_bytes: b"GEN" + u32 LE ids in the
-fingerprint) and the logits hash covers every step's logits. Sampling is not offered: its
-host RNG would have to be seeded from the job and committed to, and the trace would have to
-cover the sampler's arithmetic, which runs on the host, not on Exact Core.
+A job of kind "generate" asks for text instead: the prompt is prefilled, then up to
+`max_tokens` tokens are decoded greedily, each one a device run in the same trace, stopping
+at a token in `stop_ids`. Greedy means the argmax of the logits the trace committed to
+(TraceLog.host_read), ties to the lowest token id, so every honest run picks the same
+tokens. The answer is the token ids (answer_bytes: b"GEN" + u32 LE ids in the fingerprint)
+and the logits hash covers every step's logits. Sampling is not offered: its host RNG would
+have to be seeded from the job and committed to, and the trace would have to cover the
+sampler's arithmetic, which runs on the host, not on Exact Core. Generate jobs are off-chain
+for now: the Solana program's reveal takes a YES / NO answer.
 """
 from __future__ import annotations
 
