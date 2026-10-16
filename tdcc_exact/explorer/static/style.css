@@ -1,0 +1,75 @@
+:root {
+  --bg: #fbfbfa; --panel: #ffffff; --fg: #1d1f21; --muted: #5d6266; --line: #dfe1e3;
+  --accent: #2459c2; --warn-bg: #fff2d6; --warn-fg: #7a4b00; --bad-bg: #fde3e1; --bad-fg: #8f1d14;
+  --ok-bg: #e2f4e6; --ok-fg: #1d5f2d; --chip: #eef0f2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131517; --panel: #1b1e21; --fg: #e6e7e8; --muted: #a0a5aa; --line: #30353a;
+    --accent: #8ab4ff; --warn-bg: #3b2e12; --warn-fg: #f3cf7a; --bad-bg: #3d1a17; --bad-fg: #ff9f95;
+    --ok-bg: #173022; --ok-fg: #8fdca4; --chip: #262a2e;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0 16px 24px; background: var(--bg); color: var(--fg);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main, header.top, footer, .status { max-width: 1200px; margin-left: auto; margin-right: auto; }
+header.top {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: flex-end;
+  justify-content: space-between; padding: 16px 0 4px;
+}
+h1 { font-size: 1.35rem; margin: 0; }
+h2 { font-size: 1.05rem; margin: 24px 0 8px; }
+.sub { margin: 2px 0 0; color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+.controls { display: flex; gap: 12px; align-items: center; }
+button, select {
+  font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 10px; min-height: 32px;
+}
+button:hover { border-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a { color: var(--accent); }
+.status { min-height: 1.4em; margin: 4px auto; color: var(--muted); font-size: .9rem; }
+.status.error { color: var(--bad-fg); }
+.tiles {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 0;
+}
+.tiles div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.tiles dt { color: var(--muted); font-size: .8rem; }
+.tiles dd { margin: 2px 0 0; font-size: 1.15rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tiles dd small { display: block; font-size: .78rem; font-weight: 400; color: var(--muted); }
+.filter { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.scroll {
+  overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+}
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: .78rem; color: var(--muted); font-weight: 600; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.empty { color: var(--muted); text-align: center; padding: 16px; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip); font-size: .8rem; white-space: nowrap; }
+.chip.Open, .chip.Committed { background: var(--chip); }
+.chip.Revealed, .chip.Settled { background: var(--ok-bg); color: var(--ok-fg); }
+.chip.Challenged, .chip.late { background: var(--warn-bg); color: var(--warn-fg); }
+.chip.Slashed, .chip.Expired { background: var(--bad-bg); color: var(--bad-fg); }
+.muted { color: var(--muted); }
+.small { font-size: .8rem; }
+.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+footer { color: var(--muted); font-size: .8rem; margin-top: 24px; }
+
+/* phone width: the tables become stacked cards, each cell labelled by its column */
+@media (max-width: 640px) {
+  .scroll { overflow-x: visible; background: none; border: 0; }
+  table, tbody, tr, td { display: block; width: 100%; }
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  tbody tr { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; padding: 4px 0; }
+  td { border: 0; padding: 4px 12px; display: grid; grid-template-columns: 7.5em 1fr; gap: 8px; overflow-wrap: anywhere; }
+  td.num { text-align: left; }
+  td::before { content: attr(data-label); color: var(--muted); font-size: .78rem; }
+  td.empty { display: block; }
+  td.empty::before { content: none; }
+}
