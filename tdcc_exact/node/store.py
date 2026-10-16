@@ -274,6 +274,9 @@ class DirStore:
         self.path = Path(path)
         for kind in CHECK:
             (self.path / kind).mkdir(parents=True, exist_ok=True)
+        # orders gc's check-then-delete against a write refreshing the same blob, so a blob
+        # stored again while gc runs is never deleted after the write was acknowledged
+        self._gc_lock = threading.Lock()
 
     def _file(self, kind: str, key) -> Path:
         return self.path / kind / f"{_key(key)}.json"
@@ -283,7 +286,8 @@ class DirStore:
         p = self._file(kind, key)
         if p.exists():
             try:
-                os.utime(p)
+                with self._gc_lock:
+                    os.utime(p)
                 return False                         # content-addressed: same bytes' worth
             except FileNotFoundError:
                 pass                                 # gc took it just now: write it again
@@ -347,10 +351,15 @@ class DirStore:
                     r.pinned.append((kind, key))
                     r.kept += 1
                 else:
-                    r.deleted.append((kind, key))
-                    if not dry_run:
-                        with suppress(FileNotFoundError):
+                    if dry_run:
+                        r.deleted.append((kind, key))
+                        continue
+                    with self._gc_lock, suppress(FileNotFoundError):
+                        if now - f.stat().st_mtime > retention:   # not stored again since
                             f.unlink()
+                            r.deleted.append((kind, key))
+                            continue
+                    r.kept += 1
         return r
 
     def get_raw(self, kind: str, key) -> bytes:
@@ -403,7 +412,7 @@ class HttpStore:
         except urllib.error.HTTPError as e:
             msg = e.read(4096).decode(errors="replace")
             code = {401: Unauthorized, 403: Unauthorized, 404: NotFound, 413: TooLarge,
-                    422: Tampered}.get(e.code)
+                    422: Tampered, 503: Unavailable}.get(e.code)
             if code:
                 raise code(msg) from e
             raise StoreError(f"{method} {path}: {e.code} {msg}") from e
@@ -654,10 +663,39 @@ def _handler(store: DirStore, opts: dict):
     return H
 
 
+MAX_CLIENTS = 64
+BUSY = (b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text/plain\r\n"
+        b"Content-Length: 4\r\nRetry-After: 1\r\nConnection: close\r\n\r\nbusy")
+
+
 class StoreServer(ThreadingHTTPServer):
+    """A thread per connection, at most `max_clients` at once (more get 503 at once).
+    DirStore is safe under concurrent requests: writes are temp file + rename, so a GET
+    racing a PUT of the same key sees the whole blob or none."""
     daemon_threads = True
     _stop: threading.Event | None = None
     mirror: Mirror | None = None
+    _slots: threading.BoundedSemaphore | None = None
+
+    def process_request(self, request, client_address):
+        if self._slots is not None and not self._slots.acquire(blocking=False):
+            with suppress(OSError):
+                request.sendall(BUSY)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            if self._slots is not None:
+                self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            if self._slots is not None:
+                self._slots.release()
 
     def shutdown(self) -> None:
         if self._stop is not None:
@@ -747,7 +785,7 @@ def serve(store: DirStore, host: str = "127.0.0.1", port: int = 8787, *,
           max_body: dict | None = None, timeout: float = TIMEOUT,
           writers=None, retention: float | None = None, pins=None,
           gc_every: float = 3600.0, mirrors=(), mirror_key=None,
-          log=None) -> StoreServer:
+          max_clients: int | None = MAX_CLIENTS, log=None) -> StoreServer:
     """A store server (not started: call .serve_forever(), or `start` for a thread).
 
     max_body  {kind: bytes} over LIMITS: a larger PUT gets 413 before its body is read
@@ -760,12 +798,14 @@ def serve(store: DirStore, host: str = "127.0.0.1", port: int = 8787, *,
     pins      keys gc never deletes: a set, or a pin file (re-read each pass)
     mirrors   store URLs each newly accepted blob is pushed to (srv.mirror; PUTs signed by
               mirror_key if given)
+    max_clients  connections served at once (None: unbounded); more get 503 Busy
     """
     stop = threading.Event()
     mirror = Mirror(store, mirrors, mirror_key, stop, log=log) if mirrors else None
     srv = StoreServer((host, port), _handler(store, dict(max_body=max_body, timeout=timeout,
                                                          writers=writers, mirror=mirror)))
     srv._stop, srv.mirror = stop, mirror
+    srv._slots = threading.BoundedSemaphore(max_clients) if max_clients else None
     threading.Thread(target=_gc_loop, args=(store, srv._stop, retention, pins, gc_every, log),
                      daemon=True).start()
     return srv

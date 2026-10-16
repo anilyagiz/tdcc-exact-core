@@ -438,7 +438,86 @@ def test_cli_mirror_and_quorum(tmp_path):
     from tdcc_exact.node.cli import store_opts
     o = store_opts(_node_args("store", "--mirror", "http://a:1", "--mirror", "http://b:2"))
     assert list(o["mirrors"]) == ["http://a:1", "http://b:2"] and o["mirror_key"] is None
+    assert o["max_clients"] == 64
+    assert store_opts(_node_args("store", "--max-clients", "8"))["max_clients"] == 8
     assert _node_args("publish", "--store", "http://a:1,http://b:2", "--quorum", "1").quorum == 1
+
+
+# ------------------------------------------------------------------------------- concurrency
+def test_concurrent_puts_and_gets_of_one_key(server, job, trace_and_note, tmp_path):
+    import threading
+
+    from tdcc_exact.node.store import NotFound
+    trace, _ = trace_and_note
+    d = DirStore(tmp_path / "s")
+    srv, url = server(d, max_clients=None)
+    k, root = job.digest.hex(), trace["root"]
+    errors, seen = [], {"job": 0, "trace": 0}
+    lock = threading.Lock()
+    go = threading.Barrier(16)
+
+    def worker(i):
+        c = HttpStore(url)
+        try:
+            go.wait()
+            for n in range(15):
+                if (i + n) % 2:
+                    c.put_job(job)
+                    c.put_trace(trace)
+                for what, get, key in (("job", c.get_job, k), ("trace", c.get_trace, root)):
+                    try:
+                        got = get(key)                 # verified: never a partial blob
+                    except NotFound:
+                        continue                       # not written yet: fine
+                    assert got == job if what == "job" else got["root"] == root
+                    with lock:
+                        seen[what] += 1
+        except Exception as e:  # noqa: BLE001
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert errors == []
+    assert seen["job"] > 0 and seen["trace"] > 0
+    for kind in ("jobs", "traces"):
+        names = [p.name for p in (tmp_path / "s" / kind).iterdir()]
+        assert len(names) == 1 and names[0].endswith(".json")     # no temp files left
+
+
+def test_concurrent_writes_on_disk(tmp_path, job):
+    import threading
+    d = DirStore(tmp_path)
+    news = []
+    threads = [threading.Thread(target=lambda: news.append(d.put_raw("jobs", job.digest,
+                                                                        job_json(job))))
+               for _ in range(32)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert d.get_job(job.digest) == job and len(news) == 32
+    assert [p.name for p in (tmp_path / "jobs").iterdir()] == [f"{job.digest.hex()}.json"]
+
+
+def test_a_full_server_answers_busy(server, job):
+    from tdcc_exact.node.store import Unavailable
+    srv, url = server(max_clients=1, timeout=5)
+    host, port = url.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as s:
+        s.sendall(b"GET /job/")                        # holds the only slot
+        time.sleep(0.1)
+        with pytest.raises(Unavailable):
+            HttpStore(url).get_job(job.digest)
+    for _ in range(50):                                # the slot comes back
+        try:
+            HttpStore(url).put_job(job)
+            break
+        except Unavailable:
+            time.sleep(0.05)
+    assert HttpStore(url).get_job(job.digest) == job
 
 
 def _node_args(*argv):

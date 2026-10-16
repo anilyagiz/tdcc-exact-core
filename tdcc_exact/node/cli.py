@@ -38,7 +38,7 @@ def _duration(v: str) -> float:
 def store_opts(a) -> dict:
     """The store server's options from the command line."""
     from .store import AllowList, load_keypair
-    return dict(mirrors=a.mirror or (),
+    return dict(mirrors=a.mirror or (), max_clients=a.max_clients,
                 mirror_key=load_keypair(a.store_key) if a.store_key else None,
                 max_body=dict(a.max_body or []), timeout=a.timeout,
                 writers=AllowList(a.writers) if a.writers else None,
@@ -161,6 +161,8 @@ def add_parser(sub) -> argparse.ArgumentParser:
                         "64 MiB, 4 MiB); larger ones get 413 unread")
     n.add_argument("--timeout", type=float, default=30.0,
                    help="store: seconds a client may stall a request before it is dropped")
+    n.add_argument("--max-clients", type=int, default=64,
+                   help="store: connections served at once; more get 503 (default 64)")
     n.add_argument("--writers", metavar="FILE",
                    help="store: take PUTs only when signed by a key listed in FILE (hex or "
                         "base58, one per line; re-read when it changes). Default: anyone")
