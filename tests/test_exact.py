@@ -820,3 +820,30 @@ def test_a_user_registry_layers_over_the_packaged_one(tmp_path, monkeypatch):
 def test_the_verifier_library_is_its_own_module():
     from tdcc_exact import cli, verifier
     assert cli.verify is verifier.verify and cli.dispute is verifier.dispute
+
+
+def test_a_yesno_job_file_without_generate_fields_keeps_its_digest(setup, tmp_path):
+    """Job files from before generate jobs load as yes/no jobs, digests unchanged."""
+    import json
+    from tdcc_exact.oracle import Job
+    job, _, _ = setup
+    d = json.loads(json.dumps(job.__dict__))
+    for k in ("kind", "max_tokens", "stop_ids"):
+        d.pop(k)
+    (tmp_path / "old.json").write_text(json.dumps(d))
+    old = Job.load(tmp_path / "old.json")
+    assert old.kind == "yesno" and old.digest == job.digest
+
+
+def test_the_cli_opens_a_generate_job(tmp_path, capsys):
+    import json
+    from tdcc_exact.cli import main
+    job, rec = tmp_path / "job.json", tmp_path / "a.json"
+    assert main(["job", "new", "--question", "Tell me a story", "--kind", "generate",
+                 "--max-tokens", "3", "--out", str(job), "--every", str(EVERY)]) == 0
+    j = json.loads(job.read_text())
+    assert (j["kind"], j["max_tokens"]) == ("generate", 3)
+    assert main(["run", "--job", str(job), "--provider", "A", "--out", str(rec)]) == 0
+    assert json.loads(rec.read_text())["answer"].startswith("GEN:")
+    assert main(["verify", "--job", str(job), "--receipt", str(rec)]) == 0
+    assert "ACCEPT" in capsys.readouterr().out
