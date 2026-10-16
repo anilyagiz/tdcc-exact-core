@@ -285,12 +285,11 @@ def test_renter_on_a_validator(tmp_path):
 
     lamports = rpc.balance(renter.pubkey())
     rent = rpc.balance(ka) + rpc.balance(kb)
-    ata_rent = 2 * rpc.rent(165)          # settle opens each provider's token account
     assert r.settle_or_expire(h) == {str(ka): ["settled", "closed"],
                                      str(kb): ["settled", "closed"]}
     assert rpc.account(ka) is None and rpc.account(kb) is None
     got = rpc.balance(renter.pubkey()) - lamports
-    assert rent - ata_rent - 100_000 < got <= rent - ata_rent      # the jobs' rent, less fees
+    assert rent - 100_000 < got <= rent           # the jobs' rent back, less the fees
     host = Params().host_bps * 1_000_000 // 10_000
     assert m.balance(a.pubkey()) == m.balance(b.pubkey()) == host
     s = r.status(h)
