@@ -1,8 +1,9 @@
 """Every chain call the nodes make, in one place (the program's API is still moving).
 
 Chain wraps a chain.Market: listing Job accounts (getProgramAccounts filtered by the account
-discriminator, the market's config and, for a provider, the provider field), the slot, and the
-three instructions a node sends (commit_receipt, reveal_receipt, challenge).
+discriminator, the market's config and, for a provider, the provider field), the slot, the
+market's arbiter key, a job's ReceiptRevealed event, and the instructions a node sends
+(commit_receipt, reveal_receipt, challenge; the arbiter's slash and dismiss).
 
 The Job account's layout (programs/tdcc_exact, `pub struct Job`): an 8-byte discriminator,
 then config, renter, provider (32 bytes each), ... so the memcmp offsets of the fields the
@@ -92,6 +93,27 @@ class Chain:
     def job(self, key):
         return self.m.job(key)
 
+    def arbiter(self):
+        """The key the market's Config names to rule on challenges (slash, dismiss)."""
+        return self.m.params().arbiter
+
+    def revealed(self, key, limit: int = 100) -> dict | None:
+        """The job's ReceiptRevealed event (indexer.EVENTS field names; answer 0 NO / 1 YES,
+        logits_hash hex): the receipt's parts the Job account does not keep. None when the
+        reveal is not among the job account's last `limit` transactions."""
+        from ..indexer import events_from_logs, signatures
+        for s in signatures(self.rpc, str(key), limit):
+            if s.get("err"):
+                continue
+            tx = self.rpc.call("getTransaction", s["signature"],
+                               {"encoding": "json", "commitment": "confirmed",
+                                "maxSupportedTransactionVersion": 0})
+            for e in events_from_logs(((tx or {}).get("meta") or {}).get("logMessages"),
+                                      str(self.m.pid)):
+                if e["name"] == "ReceiptRevealed" and e["job"] == str(key):
+                    return e
+        return None
+
     # ------------------------------------------------------------------ writes
     def commit(self, owner, job, commitment: bytes) -> str:
         return self.m.commit_receipt(owner, job, commitment)
@@ -105,3 +127,19 @@ class Chain:
 
     def challenge(self, verifier, job, fingerprint: bytes) -> str:
         return self.m.challenge(verifier, job, fingerprint)
+
+    def slash(self, arbiter, job, divergence_index: int, fault_step: int) -> str:
+        """The arbiter's ruling for the challenger; the arbiter signs and pays (the fee, and
+        the verifier's token account if it has none), so it needs no admin key."""
+        m, j = self.m, self.job(job)
+        m.arbiter = arbiter                                  # slash_ix names m.arbiter
+        return self.rpc.send([m.token_account_ix(j.verifier, arbiter.pubkey()),
+                              m.slash_ix(job, j.renter, j.provider, j.verifier,
+                                         divergence_index, fault_step)], arbiter)
+
+    def dismiss(self, caller, job) -> str:
+        """The arbiter rejects the challenge (anyone may, after the ruling deadline); the
+        caller signs and pays."""
+        m, j = self.m, self.job(job)
+        return self.rpc.send([m.token_account_ix(j.provider, caller.pubkey()),
+                              m.dismiss_ix(caller.pubkey(), job, j.provider)], caller)
