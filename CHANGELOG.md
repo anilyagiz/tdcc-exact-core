@@ -27,6 +27,23 @@ The first open-source release of TDCC Exact.
 - LFM2.5-230M runs (prefill, a layer-true dishonest provider for the demo).
 - CI: the Python tests, the README's commands, and the program on a local validator.
 
+- Every run bound to its on-chain job and every job given a nonce, so a fingerprint cannot be
+  replayed across jobs; the checkpoint interval is part of the job.
+- The trace covers the host's read of the logits and each slice's DRAM stores; a dispute checks
+  a provider's revealed window against its posted checkpoints, and rules an output fault when
+  the traces agree but the receipt does not.
+- The program checks the fingerprint and the trace root at reveal, takes a challenge bond, gives
+  the arbiter its own rotatable key and a ruling deadline, penalizes a withheld reveal, refuses
+  a reveal from a provider below the minimum stake, lets a renter give a fan-out one commit
+  deadline, and closes finished jobs (`close_job`).
+- Services: a content-addressed job and trace store, a provider node and a verifier node
+  (`tdcc-exact node`), and an indexer (`tdcc-exact market status|events`).
+- A public library API (`tdcc_exact.__all__`, `__version__`, `py.typed`), the commit's salt in
+  a private file, `verify --strict`, a user model registry.
+- Docs: architecture, threat model, glossary, operations; an oracle evaluation tool.
+- CI on Python 3.10 to 3.13, the verifier on macOS and Windows, ruff, rustfmt and clippy,
+  Dependabot, and a release workflow.
+
 ### Security
 
 - The program is unaudited and runs on devnet only; see [SECURITY.md](SECURITY.md) for its
