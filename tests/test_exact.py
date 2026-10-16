@@ -1,4 +1,5 @@
 """TDCC Exact: the trace log, the receipt's fingerprint and the dispute, on the tiny model."""
+import os
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from tdcc_exact.settle import accept, slash
 from tdcc_exact.trace import Checkpoint, StepRecord, merkle_proof, merkle_root, merkle_verify
 
 EVERY = 512
+POSIX_MODES = os.name != "nt"   # Windows keeps no rwx modes: a file's 0600 is not observable
 BIND = provider_key("A")      # A's job (the CLI's default binding for provider A)
 
 
@@ -314,7 +316,7 @@ def test_a_new_keypair_file_is_never_readable_by_others(tmp_path, monkeypatch):
     finally:
         os.umask(old)
     p = tmp_path / "keys" / "localnet" / "renter.json"
-    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert POSIX_MODES is False or stat.S_IMODE(p.stat().st_mode) == 0o600
     assert chain.keypair("localnet", "renter").pubkey() == k.pubkey()   # read back the same
 
 
@@ -402,7 +404,7 @@ def test_the_salt_stays_out_of_the_shared_receipt(tmp_path, capsys):
                  "--every", str(EVERY)]) == 0
     assert main(["run", "--job", str(job), "--provider", "A", "--out", str(rec)]) == 0
     salt = tmp_path / "a.json.salt"
-    assert stat.S_IMODE(salt.stat().st_mode) == 0o600
+    assert POSIX_MODES is False or stat.S_IMODE(salt.stat().st_mode) == 0o600
     assert len(bytes.fromhex(salt.read_text().strip())) == 32
     assert salt.read_text().strip() not in rec.read_text()
     base = ["verify", "--job", str(job), "--receipt", str(rec)]
@@ -420,7 +422,7 @@ def test_the_salt_stays_out_of_the_shared_receipt(tmp_path, capsys):
     out = tmp_path / "custom.salt"
     assert main(["run", "--job", str(job), "--provider", "A", "--out", str(rec),
                  "--salt-out", str(out)]) == 0
-    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    assert POSIX_MODES is False or stat.S_IMODE(out.stat().st_mode) == 0o600
 
 
 def test_the_verifier_needs_no_fcntl():
