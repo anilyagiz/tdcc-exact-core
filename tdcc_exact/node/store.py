@@ -41,6 +41,9 @@ from ..trace import Checkpoint, merkle_root
 
 KEY = re.compile(r"^[0-9a-f]{64}$")
 MAX_BODY = 64 << 20              # bytes per PUT (a trace of a large model's run fits)
+# the most a PUT (or a GET's reply) of each kind may carry; serve(max_body=...) overrides
+LIMITS = {"jobs": 1 << 20, "traces": MAX_BODY, "signed": 4 << 20}
+TIMEOUT = 30.0                   # seconds the server waits on a silent client socket
 
 
 class StoreError(RuntimeError):
@@ -53,6 +56,14 @@ class NotFound(StoreError):
 
 class Tampered(StoreError):
     """The blob does not hash to the key it was stored or fetched under."""
+
+
+class TooLarge(StoreError):
+    """The blob is over the store's size limit for its kind (HTTP 413)."""
+
+
+class Unavailable(StoreError):
+    """The store could not be reached (connection refused, reset or timed out)."""
 
 
 def _key(key: str | bytes) -> str:
@@ -212,22 +223,41 @@ class DirStore:
 
 
 class HttpStore:
-    def __init__(self, url: str, timeout: float = 30.0):
-        self.url, self.timeout = url.rstrip("/"), timeout
+    """A client of a store server. It checks every blob it fetches, and reads no more of a
+    reply than `max_body` allows for its kind (a server cannot make it buffer a huge blob)."""
 
-    def _req(self, method: str, path: str, body: bytes | None = None) -> bytes:
+    def __init__(self, url: str, timeout: float = 30.0, max_body: dict | None = None):
+        self.url, self.timeout = url.rstrip("/"), timeout
+        self.max_body = {**LIMITS, **(max_body or {})}
+
+    def _req(self, method: str, path: str, body: bytes | None = None,
+             limit: int = MAX_BODY) -> bytes:
         req = urllib.request.Request(self.url + path, body, method=method,
                                      headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                return r.read()
+                data = r.read(limit + 1)
         except urllib.error.HTTPError as e:
-            msg = e.read().decode(errors="replace")
-            if e.code == 404:
-                raise NotFound(msg) from e
-            if e.code == 422:
-                raise Tampered(msg) from e
+            msg = e.read(4096).decode(errors="replace")
+            code = {404: NotFound, 413: TooLarge, 422: Tampered}.get(e.code)
+            if code:
+                raise code(msg) from e
             raise StoreError(f"{method} {path}: {e.code} {msg}") from e
+        except OSError as e:                 # URLError, reset, timeout
+            raise Unavailable(f"{method} {self.url}{path}: {e}") from e
+        if len(data) > limit:
+            raise TooLarge(f"{method} {path}: the reply is over {limit} bytes")
+        return data
+
+    def put_raw(self, kind: str, key, raw: bytes) -> None:
+        CHECK[kind](raw, key)
+        self._req("PUT", f"/{ROUTE_OF[kind]}/{_key(key)}", raw)
+
+    def get_raw(self, kind: str, key) -> bytes:
+        k = _key(key)
+        raw = self._req("GET", f"/{ROUTE_OF[kind]}/{k}", limit=self.max_body[kind])
+        CHECK[kind](raw, k)
+        return raw
 
     def put_job(self, job: Job) -> str:
         k = job.digest.hex()
@@ -236,7 +266,7 @@ class HttpStore:
 
     def get_job(self, key) -> Job:
         k = _key(key)
-        return job_from_json(self._req("GET", f"/job/{k}"), k)
+        return job_from_json(self.get_raw("jobs", k), k)
 
     def put_trace(self, trace: dict) -> str:
         k = trace_root(trace)
@@ -245,7 +275,7 @@ class HttpStore:
 
     def get_trace(self, key) -> dict:
         k = _key(key)
-        return trace_from_json(self._req("GET", f"/trace/{k}"), k)
+        return trace_from_json(self.get_raw("traces", k), k)
 
     def put_signed(self, note: dict) -> str:
         k = signed_key(note["topic"], note["job"], note["signer"])
@@ -254,7 +284,7 @@ class HttpStore:
 
     def get_signed(self, key) -> dict:
         k = _key(key)
-        return signed_from_json(self._req("GET", f"/signed/{k}"), k)
+        return signed_from_json(self.get_raw("signed", k), k)
 
 
 def open_store(where: str):
@@ -263,51 +293,83 @@ def open_store(where: str):
 
 
 # ------------------------------------------------------------------------------- server
-ROUTE = re.compile(r"^/(job|trace|signed)/([0-9a-fA-F]{64})$")
+# A key is exactly 64 lowercase hex digits: anything else (../, %2e%2e, an overlong or short
+# key, upper case, a query string) is refused before it comes near the filesystem.
+ROUTE = re.compile(r"^/(job|trace|signed)/([0-9a-f]{64})$")
+PREFIX = re.compile(r"^/(job|trace|signed)/")
 KINDS = {"job": "jobs", "trace": "traces", "signed": "signed"}
+ROUTE_OF = {v: k for k, v in KINDS.items()}
 
 
-def _handler(store: DirStore):
+class _Refuse(Exception):
+    def __init__(self, code: int, msg: str):
+        super().__init__(msg)
+        self.code, self.msg = code, msg
+
+
+def _handler(store: DirStore, opts: dict):
+    limits = {**LIMITS, **(opts.get("max_body") or {})}
+
     class H(BaseHTTPRequestHandler):
+        timeout = opts.get("timeout", TIMEOUT)      # socket timeout: a stalled client is cut off
+
         def _route(self):
             m = ROUTE.match(self.path)
             if not m:
-                self._send(404, b"no such route")
-                return None
-            return KINDS[m.group(1)], m.group(2).lower()
+                if PREFIX.match(self.path):
+                    raise _Refuse(400, "a key is 64 lowercase hex digits")
+                raise _Refuse(404, "no such route")
+            return KINDS[m.group(1)], m.group(2)
 
         def _send(self, code: int, body: bytes) -> None:
             self.send_response(code)
             self.send_header("Content-Type", "application/json" if code == 200 else
                              "text/plain")
             self.send_header("Content-Length", str(len(body)))
+            if code >= 400:
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self):  # noqa: N802
-            r = self._route()
-            if r is None:
-                return
+        def _body(self, kind: str) -> bytes:
+            """The PUT's body, refused unread if it is too large, chunked or unsized."""
+            if self.headers.get("Transfer-Encoding"):
+                raise _Refuse(411, "a PUT needs a Content-Length (no chunked bodies)")
+            n = self.headers.get("Content-Length")
+            if n is None:
+                raise _Refuse(411, "a PUT needs a Content-Length")
+            if not n.strip().isdigit():
+                raise _Refuse(400, "bad Content-Length")
+            n = int(n)
+            if n > limits[kind]:
+                raise _Refuse(413, f"a {NAME[kind]} is at most {limits[kind]} bytes")
+            raw = self.rfile.read(n)
+            if len(raw) != n:
+                raise _Refuse(400, "the body ended early")
+            return raw
+
+        def _do(self, fn):
             try:
-                self._send(200, store.get_raw(*r))
+                fn()
+            except _Refuse as e:
+                self._send(e.code, e.msg.encode())
             except NotFound as e:
                 self._send(404, str(e).encode())
-
-        def do_PUT(self):  # noqa: N802
-            r = self._route()
-            if r is None:
-                return
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > MAX_BODY:
-                self._send(413, b"too large")
-                return
-            raw = self.rfile.read(n)
-            try:
-                store.put_raw(r[0], r[1], raw)
             except Tampered as e:
                 self._send(422, str(e).encode())
-                return
-            self._send(200, b'{"ok": true}')
+            except (TimeoutError, ConnectionError):
+                self.close_connection = True         # the client stalled or went away
+
+        def do_GET(self):  # noqa: N802
+            self._do(lambda: self._send(200, store.get_raw(*self._route())))
+
+        def do_PUT(self):  # noqa: N802
+            def put():
+                kind, key = self._route()
+                store.put_raw(kind, key, self._body(kind))
+                self._send(200, b'{"ok": true}')
+            self._do(put)
 
         def log_message(self, fmt, *args):    # quiet; the CLI prints its own lines
             pass
@@ -315,13 +377,22 @@ def _handler(store: DirStore):
     return H
 
 
-def serve(store: DirStore, host: str = "127.0.0.1", port: int = 8787) -> ThreadingHTTPServer:
-    """A store server (not started: call .serve_forever(), or `start` for a thread)."""
-    return ThreadingHTTPServer((host, port), _handler(store))
+class StoreServer(ThreadingHTTPServer):
+    daemon_threads = True
 
 
-def start(store: DirStore, host: str = "127.0.0.1", port: int = 0):
+def serve(store: DirStore, host: str = "127.0.0.1", port: int = 8787, *,
+          max_body: dict | None = None, timeout: float = TIMEOUT) -> StoreServer:
+    """A store server (not started: call .serve_forever(), or `start` for a thread).
+
+    max_body  {kind: bytes} over LIMITS: a larger PUT gets 413 before its body is read
+    timeout   seconds a request may sit idle on its socket before the server drops it
+    """
+    return StoreServer((host, port), _handler(store, dict(max_body=max_body, timeout=timeout)))
+
+
+def start(store: DirStore, host: str = "127.0.0.1", port: int = 0, **opts):
     """A store server on a daemon thread: (server, its URL). server.shutdown() stops it."""
-    srv = serve(store, host, port)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv = serve(store, host, port, **opts)
+    threading.Thread(target=srv.serve_forever, args=(0.1,), daemon=True).start()
     return srv, f"http://{host}:{srv.server_address[1]}"

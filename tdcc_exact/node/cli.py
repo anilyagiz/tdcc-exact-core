@@ -18,10 +18,23 @@ from pathlib import Path
 
 
 
+def _limit(v: str) -> tuple[str, int]:
+    kind, _, n = v.partition("=")
+    kinds = {"job": "jobs", "trace": "traces", "signed": "signed"}
+    if kind not in kinds or not n.isdigit():
+        raise argparse.ArgumentTypeError(f"{v!r}: want job|trace|signed=BYTES")
+    return kinds[kind], int(n)
+
+
+def store_opts(a) -> dict:
+    """The store server's options from the command line."""
+    return dict(max_body=dict(a.max_body or []), timeout=a.timeout)
+
+
 def cmd_node(a) -> int:
     from .store import DirStore, open_store, serve
     if a.role == "store":
-        srv = serve(DirStore(a.dir), a.host, a.port)
+        srv = serve(DirStore(a.dir), a.host, a.port, **store_opts(a))
         print(f"store: {Path(a.dir).resolve()} on http://{a.host}:{srv.server_address[1]}")
         try:
             srv.serve_forever()
@@ -114,6 +127,11 @@ def add_parser(sub) -> argparse.ArgumentParser:
     n.add_argument("--dir", default="tdcc-store", help="store: where the blobs go")
     n.add_argument("--host", default="127.0.0.1", help="store: address to listen on")
     n.add_argument("--port", type=int, default=8787, help="store: port")
+    n.add_argument("--max-body", type=_limit, action="append", metavar="KIND=BYTES",
+                   help="store: largest PUT of a kind (job|trace|signed; default 1 MiB, "
+                        "64 MiB, 4 MiB); larger ones get 413 unread")
+    n.add_argument("--timeout", type=float, default=30.0,
+                   help="store: seconds a client may stall a request before it is dropped")
     n.add_argument("--job", help="publish: the Job JSON file")
     n.set_defaults(fn=cmd_node)
     return n
