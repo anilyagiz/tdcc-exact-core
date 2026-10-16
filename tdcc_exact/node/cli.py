@@ -1,13 +1,15 @@
-"""`tdcc-exact node provider|verifier|store|publish`: the market's off-chain services.
+"""`tdcc-exact node provider|verifier|arbiter|store|publish`: the market's off-chain services.
 
     tdcc-exact node store    --dir ~/tdcc-store [--host 0.0.0.0 --port 8787]
     tdcc-exact node publish  --job job.json --store http://host:8787        (a renter)
     tdcc-exact node provider --rpc URL --keys DIR --store http://host:8787 [--once]
     tdcc-exact node verifier --rpc URL --keys DIR --store http://host:8787 [--rate 0.2] [--once]
+    tdcc-exact node arbiter  --rpc URL --keys DIR --store http://host:8787 [--once]
 
 --keys DIR holds Solana keypair files: the node's own (<name>.json, `provider` or `verifier`
 by default, created on first use) and, unless --admin names the market's admin public key,
-admin.json (the market is the config PDA seeded by the admin's key).
+admin.json (the market is the config PDA seeded by the admin's key). The arbiter signs with
+KEYS/arbiter.json, or admin.json when there is none; it must be the market's Config.arbiter.
 """
 from __future__ import annotations
 
@@ -37,7 +39,14 @@ def cmd_node(a) -> int:
     if not a.keys:
         raise SystemExit("--keys DIR is required")
     name = a.name or a.role
-    owner = load_key(a.keys, name)
+    if a.role == "arbiter":
+        try:
+            owner = load_key(a.keys, name, create=False)
+        except FileNotFoundError:
+            name, owner = "admin", load_key(a.keys, "admin", create=False)
+        name = "arbiter"                    # the state file's name, whichever key signs
+    else:
+        owner = load_key(a.keys, name)
     chain = Chain.connect(a.rpc, market_admin(a.keys, a.admin), a.cluster)
     state = a.state or str(Path(a.keys) / f"{name}.state" / "state.json")
     models = Models(a.models)
@@ -47,6 +56,17 @@ def cmd_node(a) -> int:
         node = ProviderNode(chain, owner, store, state, models)
         if a.once:
             print(node.run_once(wait=True))
+            return 0
+    elif a.role == "arbiter":
+        from .arbiter import ArbiterNode, NotArbiter
+        try:
+            node = ArbiterNode(chain, owner, store, state, models,
+                               missing_trace_loses=not a.missing_trace_waits,
+                               trace_grace=a.trace_grace)
+        except NotArbiter as e:
+            raise SystemExit(str(e)) from None
+        if a.once:
+            print(node.run_once())
             return 0
     else:
         from .verifier import VerifierNode
@@ -62,10 +82,10 @@ def cmd_node(a) -> int:
 
 
 def add_parser(sub) -> argparse.ArgumentParser:
-    n = sub.add_parser("node", help="run a market service: job store, provider or verifier",
+    n = sub.add_parser("node", help="run a market service: job store, provider, verifier or arbiter",
                        description=__doc__,
                        formatter_class=argparse.RawDescriptionHelpFormatter)
-    n.add_argument("role", choices=["provider", "verifier", "store", "publish"])
+    n.add_argument("role", choices=["provider", "verifier", "arbiter", "store", "publish"])
     n.add_argument("--rpc", default="http://127.0.0.1:8899", help="Solana RPC URL")
     n.add_argument("--cluster", default="localnet", help="for Explorer links only")
     n.add_argument("--keys", help="keypair directory (the node's key, admin.json)")
@@ -75,6 +95,12 @@ def add_parser(sub) -> argparse.ArgumentParser:
     n.add_argument("--state", help="state file (default: KEYS/<name>.state/state.json)")
     n.add_argument("--models", help="directory holding the models jobs name")
     n.add_argument("--rate", type=float, default=1.0, help="verifier: share of jobs re-run")
+    n.add_argument("--missing-trace-waits", action="store_true",
+                   help="arbiter: a provider whose trace is not in the store is not slashed "
+                        "(default: it loses)")
+    n.add_argument("--trace-grace", type=int,
+                   help="arbiter: slots after a challenge to wait for a missing trace "
+                        "(default: half the ruling window)")
     n.add_argument("--once", action="store_true", help="one pass, then exit")
     n.add_argument("--poll", type=float, default=2.0, help="seconds between passes")
     n.add_argument("--dir", default="tdcc-store", help="store: where the blobs go")
