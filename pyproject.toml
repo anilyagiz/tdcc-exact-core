@@ -75,7 +75,8 @@ include = [
     "tests/test_explorer.py",
     "tests/test_renter.py",
     "tests/test_store.py",
-    "tests/test_generate.py", "tests/test_exact_rtl.py",
+    "tests/test_generate.py",
+    "tests/test_exact_rtl.py",
 ]
 
 [tool.ruff.lint]
