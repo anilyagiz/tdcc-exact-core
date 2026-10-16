@@ -115,6 +115,44 @@ def test_cli_publish(tmp_path, job, capsys):
     assert DirStore(tmp_path / "store").get_job(job.digest) == job
 
 
+def test_signed_note_round_trip(store):
+    pytest.importorskip("solders")
+    from solders.keypair import Keypair
+
+    from tdcc_exact.node.store import sign_note, signed_key
+    k, job_key = Keypair(), bytes([5]) * 32
+    note = sign_note(k, "window/0/512", job_key, {"records": [1, 2]})
+    key = store.put_signed(note)
+    assert key == signed_key("window/0/512", job_key, k.pubkey())
+    assert store.get_signed(key)["body"] == {"records": [1, 2]}
+    with pytest.raises(NotFound):
+        store.get_signed(signed_key("window/0/1024", job_key, k.pubkey()))
+
+
+def test_a_signed_note_cannot_be_squatted_or_changed(tmp_path):
+    pytest.importorskip("solders")
+    from solders.keypair import Keypair
+
+    from tdcc_exact.node.store import sign_note, signed_key
+    d, owner, other, job_key = DirStore(tmp_path), Keypair(), Keypair(), bytes([5]) * 32
+    key = signed_key("challenge", job_key, owner.pubkey())
+    # someone else's note under the owner's key: the key does not match its signer
+    with pytest.raises(Tampered):
+        d.put_raw("signed", key, json.dumps(sign_note(other, "challenge", job_key, {})).encode())
+    # the owner's signer field, someone else's signature
+    forged = sign_note(other, "challenge", job_key, {"trace_root": "00" * 32})
+    forged["signer"] = bytes(owner.pubkey()).hex()
+    with pytest.raises(Tampered):
+        d.put_raw("signed", key, json.dumps(forged).encode())
+    # a body changed after signing
+    note = sign_note(owner, "challenge", job_key, {"trace_root": "00" * 32})
+    d.put_signed(note)
+    bad = dict(note, body={"trace_root": "11" * 32})
+    (tmp_path / "signed" / f"{key}.json").write_text(json.dumps(bad))
+    with pytest.raises(Tampered):
+        d.get_signed(key)
+
+
 def test_open_store(tmp_path):
     assert isinstance(open_store(str(tmp_path)), DirStore)
     assert isinstance(open_store("http://127.0.0.1:1"), HttpStore)
