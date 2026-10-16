@@ -6,14 +6,22 @@ sample different ones), fetches the Job from the store under the on-chain digest
 and compares fingerprints: a match is accepted, a mismatch challenged while the challenge
 window is open. Each verdict goes into the state file, with whether the provider's trace was
 in the store (the arbiter's bisection needs it).
+
+When it challenges, the node publishes its re-run's trace to the store and a note it signs
+under store.signed_key("challenge", job, verifier) naming that trace's root: the challenged
+provider bisects its trace against it to find the window it must reveal (the protocol:
+tdcc_exact/node/__init__.py). A publish that fails is retried on later passes while the job
+is Challenged; the challenge itself does not wait for it.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import time
+from pathlib import Path
 
 from .common import Models, StateFile, verdict
-from .store import NotFound, StoreError, Tampered
+from .store import NotFound, StoreError, Tampered, sign_note
 
 
 class VerifierNode:
@@ -21,6 +29,7 @@ class VerifierNode:
                  rate: float = 1.0, log=print):
         self.chain, self.owner, self.store = chain, owner, store
         self.state = StateFile(state_path)
+        self.traces = Path(state_path).parent / "traces"
         self.models = models or Models()
         self.rate, self.log = rate, log
 
@@ -32,9 +41,15 @@ class VerifierNode:
     def run_once(self) -> dict:
         """{job: verdict} of the jobs this pass decided."""
         out = {}
-        for key, j in self.chain.jobs(states={"Revealed"}):
+        for key, j in self.chain.jobs(states={"Revealed", "Challenged"}):
             k = str(key)
-            if self.state.get(k):
+            s = self.state.get(k)
+            if j.state == "Challenged":
+                if (s and s.get("verdict") == "challenged" and not s.get("published")
+                        and bytes(j.verifier) == bytes(self.owner.pubkey())):
+                    self._publish(k, key)
+                continue
+            if s:
                 continue
             try:
                 v = self._check(key, j)
@@ -74,7 +89,9 @@ class VerifierNode:
                                                        f"on-chain one: {e}")
         except NotFound:
             raise StoreError(f"job {j.job_digest.hex()[:16]}.. is not in the store") from None
-        v = verdict(job, j, self.models, bytes(key))
+        self.traces.mkdir(parents=True, exist_ok=True)
+        tf = self.traces / f"{k}.json"
+        v = verdict(job, j, self.models, bytes(key), trace=tf)
         try:
             self.store.get_trace(j.trace_root.hex())
             trace = "available"
@@ -83,10 +100,27 @@ class VerifierNode:
         info = dict(posted=j.fingerprint.hex(), rerun=v["re_run"], provider=str(j.provider),
                     trace=trace)
         if v["verdict"] == "ACCEPT":
+            tf.unlink(missing_ok=True)
             return self._record(k, "accepted", **info)
         why = v.get("why") or "fingerprint mismatch" + (
             f": {', '.join(v['differs'])} differ" if v["differs"] else "")
         if self.chain.slot() > j.challenge_deadline:
             return self._record(k, "late", why=f"{why}, after the challenge window", **info)
         sig = self.chain.challenge(self.owner, key, bytes.fromhex(v["re_run"]))
-        return self._record(k, "challenged", sig=sig, why=why, **info)
+        r = self._record(k, "challenged", sig=sig, why=why, trace_file=str(tf), **info)
+        self._publish(k, key)
+        return r
+
+    def _publish(self, k: str, key) -> bool:
+        """Publish the challenge's trace and the signed note pointing at it."""
+        try:
+            tf = Path(self.state.get(k)["trace_file"])
+            root = self.store.put_trace(json.loads(tf.read_text()))
+            self.store.put_signed(sign_note(self.owner, "challenge", bytes(key),
+                                            {"trace_root": root}))
+        except (StoreError, OSError, KeyError) as e:
+            self.log(f"{k[:8]}: publishing the challenge's trace: {e} (retry next pass)")
+            return False
+        self.state.set(k, published=True, challenge_trace=root)
+        self.log(f"{k[:8]}: challenge trace {root[:16]}.. published")
+        return True

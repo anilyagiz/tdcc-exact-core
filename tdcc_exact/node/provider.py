@@ -7,6 +7,13 @@ one step along, as far as the chain's state and the slot allow:
                 it, save the receipt, its salt and its trace, then commit_receipt
     Committed   once the slot is past commit_deadline, reveal_receipt (from the saved salt)
     Revealed+   publish the trace to the store (data availability for verifiers)
+    Challenged  reveal the disputed window: fetch the challenger's signed note
+                (store.signed_key("challenge", job, verifier)) and the trace it names, bisect
+                it against this node's own checkpoints, re-run the job (bound to the job
+                account) recording that window, and publish it as a note this node signs
+                under signed_key(window_topic(lo, hi), job, provider): the arbiter's
+                bisection names the same (lo, hi) when the challenger's trace is honest
+                (the protocol: tdcc_exact/node/__init__.py). Once per challenge.
 
 Before committing the node refuses a job unless the Job it fetched hashes to the on-chain
 job_digest and the on-chain model_hash is the registry's pinned hash for the job's
@@ -27,9 +34,11 @@ from pathlib import Path
 
 from .. import registry
 from ..commit import commitment, new_salt
+from ..dispute import bisect
 from ..oracle import model_name
-from .common import Models, StateFile, run
-from .store import NotFound, StoreError, Tampered
+from ..trace import Checkpoint, record_to_json
+from .common import Models, StateFile, run, window_records, window_topic
+from .store import NotFound, StoreError, Tampered, sign_note, signed_key
 
 DONE = {"refused", "missed", "published", "lost"}
 
@@ -37,14 +46,15 @@ DONE = {"refused", "missed", "published", "lost"}
 class ProviderNode:
     def __init__(self, chain, owner, store, state_path, models: Models | None = None,
                  registry_path=registry.PATH, skip_layer: int | None = None,
-                 log=print):
-        """skip_layer: tests only, a dishonest provider that skips that layer's work."""
+                 reveal_windows: bool = True, log=print):
+        """skip_layer: tests only, a dishonest provider that skips that layer's work;
+        reveal_windows: False, tests only, a provider that withholds its disputed windows."""
         self.chain, self.owner, self.store = chain, owner, store
         self.state = StateFile(state_path)
         self.traces = Path(state_path).parent / "traces"
         self.models = models or Models()
         self.registry_path, self.skip_layer = registry_path, skip_layer
-        self.log = log
+        self.reveal_windows, self.log = reveal_windows, log
 
     # ------------------------------------------------------------------ one pass
     def run_once(self, wait: bool = False) -> dict:
@@ -74,10 +84,11 @@ class ProviderNode:
         for key, j in self._mine():
             k = str(key)
             s = self.state.get(k) or {}
-            if s.get("status") in DONE:
+            challenged = j.state == "Challenged" and s.get("status") == "published"
+            if s.get("status") in DONE and not challenged:
                 continue
             try:
-                st = self._step(key, j, s)
+                st = self._answer(key, j, s) if challenged else self._step(key, j, s)
             except StoreError as e:
                 st = None
                 self.log(f"{k[:8]}: store: {e} (retry next pass)")
@@ -189,3 +200,40 @@ class ProviderNode:
         self.state.set(k, status="published")
         self.log(f"{k[:8]}: trace {key[:16]}.. published")
         return "published"
+
+    # ------------------------------------------------------------------ a challenge
+    def _answer(self, key, j, s: dict) -> str | None:
+        """Reveal the window the challenger's trace disputes (once per challenge)."""
+        k = str(key)
+        if s.get("answered") == j.challenge_slot:
+            return None
+        mine = json.loads(Path(s["trace_file"]).read_text())
+        cps = [Checkpoint.from_json(c) for c in mine["checkpoints"]]
+        try:
+            note = self.store.get_signed(signed_key("challenge", bytes(key), j.verifier))
+            theirs = self.store.get_trace(note["body"]["trace_root"])
+        except NotFound:
+            self.log(f"{k[:8]}: challenged; the challenger's trace is not in the store yet")
+            return None
+        d = bisect([Checkpoint.from_json(c) for c in theirs["checkpoints"]], cps)
+        if d is None or d.index >= len(cps):
+            why = ("the challenger's trace agrees with this node's" if d is None else
+                   "the challenger's trace is longer: no posted checkpoint to reveal up to")
+            self.state.set(k, answered=j.challenge_slot, window="none", window_why=why)
+            self.log(f"{k[:8]}: challenged; no window to reveal ({why})")
+            return "no-window"
+        if not self.reveal_windows:
+            self.state.set(k, answered=j.challenge_slot, window="withheld")
+            self.log(f"{k[:8]}: challenged; withholding window {d.lo}..{d.hi}")
+            return "withheld"
+        job = self.store.get_job(s["job_digest"])
+        recs = window_records(job, self.models, bytes(key), d, self.skip_layer)
+        body = {"lo": d.lo, "hi": d.hi, "index": d.index,
+                "records": [record_to_json(r) for r in recs]}
+        self.store.put_signed(sign_note(self.owner, window_topic(d.lo, d.hi), bytes(key),
+                                        body))
+        self.state.set(k, answered=j.challenge_slot, window=f"{d.lo}..{d.hi}",
+                       window_index=d.index)
+        self.log(f"{k[:8]}: challenged; window {d.lo}..{d.hi} ({len(recs)} records) "
+                 "revealed")
+        return "window"
