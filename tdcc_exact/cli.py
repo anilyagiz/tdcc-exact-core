@@ -25,6 +25,7 @@ from . import registry
 from .backend import SkipLayer
 from .commit import commitment, new_salt, provider_key
 from .dispute import matches_root
+from .explorer import cmd_explore
 from .indexer import cmd_market
 from .node.cli import add_parser as add_node_parser
 from .oracle import (TINY, Job, Receipt, build_hash, layers_of, load_model, load_trace,
@@ -301,6 +302,13 @@ def main(argv=None) -> int:
     mk.add_argument("--limit", type=int, default=100, help="events: the last N transactions")
     mk.add_argument("--json", action="store_true")
     mk.set_defaults(fn=cmd_market)
+
+    ex = sub.add_parser("explore", help="serve a web page over the market (snapshot, jobs, events)")
+    ex.add_argument("--rpc", help="RPC URL (default: $TDCC_EXACT_RPC, else devnet)")
+    ex.add_argument("--admin", help="only this admin's market")
+    ex.add_argument("--host", default="127.0.0.1", help="address to bind (default: localhost only)")
+    ex.add_argument("--port", type=int, default=8788)
+    ex.set_defaults(fn=cmd_explore)
 
     add_node_parser(sub)
 
