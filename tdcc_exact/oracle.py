@@ -18,6 +18,16 @@ twice (with provider A and with provider B, or asked again) has two trace roots 
 fingerprints, and a fingerprint revealed on one is no use on the other. A verifier re-runs
 with the binding of the on-chain job, never one a receipt claims. The job also carries a
 random nonce (new_job) in its digest, so two jobs' digests differ too.
+
+A job of kind "generate" asks for text instead: the prompt is prefilled, then up to
+`max_tokens` tokens are decoded greedily, each one a device run in the same trace, stopping
+at a token in `stop_ids`. Greedy means the argmax of the logits the trace committed to
+(TraceLog.host_read), ties to the lowest token id, so every honest run picks the same
+tokens. The answer is the token ids (answer_bytes: b"GEN" + u32 LE ids in the fingerprint)
+and the logits hash covers every step's logits. Sampling is not offered: its host RNG would
+have to be seeded from the job and committed to, and the trace would have to cover the
+sampler's arithmetic, which runs on the host, not on Exact Core. Generate jobs are off-chain
+for now: the Solana program's reveal takes a YES / NO answer.
 """
 from __future__ import annotations
 
@@ -33,6 +43,8 @@ from .backend import SkipLayer, factory
 from .trace import EVERY, UNBOUND, TraceLog, h
 
 TINY = "tiny"                    # a small random Qwen3-style model: tests and the quick demo
+KINDS = ("yesno", "generate")
+GEN_TAG = b"GEN"                 # a generate job's answer in the fingerprint: GEN || u32 LE ids
 
 
 @dataclass
@@ -49,32 +61,62 @@ class Job:
     nonce: str = ""              # 32 random bytes (hex), chosen by new_job: in the digest
     every: int = EVERY           # steps between trace checkpoints: the trace's shape, so a
                                  # provider and a verifier must agree on it (in the digest)
+    kind: str = "yesno"          # or "generate": greedy decoding of up to max_tokens tokens
+    max_tokens: int = 0          # generate: tokens to decode at most (yesno: 0)
+    stop_ids: list[int] = field(default_factory=list)   # generate: tokens that end the answer
+                                 # (kept, as the answer's last token)
 
     def __post_init__(self):
         """Integral fields become plain ints (an np.int64 id would not serialize; a 3.0 would
         give another digest than 3), the rest must be strings: a job has one digest."""
-        for k in ("yes_id", "no_id", "cap", "chunk", "every"):
+        for k in ("yes_id", "no_id", "cap", "chunk", "every", "max_tokens"):
             setattr(self, k, _int(getattr(self, k), k))
-        if isinstance(self.prompt_ids, (str, bytes)) or not hasattr(self.prompt_ids, "__iter__"):
-            raise ValueError(f"prompt_ids must be a list of token ids, not {self.prompt_ids!r}")
-        self.prompt_ids = [_int(t, "prompt_ids") for t in self.prompt_ids]
-        for k in ("model", "question", "wformat", "job_id", "nonce"):
+        for k in ("prompt_ids", "stop_ids"):
+            v = getattr(self, k)
+            if isinstance(v, (str, bytes)) or not hasattr(v, "__iter__"):
+                raise ValueError(f"{k} must be a list of token ids, not {v!r}")
+            setattr(self, k, [_int(t, k) for t in v])
+        for k in ("model", "question", "wformat", "job_id", "nonce", "kind"):
             if not isinstance(getattr(self, k), str):
                 raise ValueError(f"{k} must be a string, not {getattr(self, k)!r}")
+        if self.kind not in KINDS:
+            raise ValueError(f"kind {self.kind!r} is not one of {KINDS}")
+
+    @property
+    def generate(self) -> bool:
+        return self.kind == "generate"
 
     @property
     def digest(self) -> bytes:
+        """H(the job's fields as sorted JSON, without job_id). A yes/no job's digest leaves
+        out kind, max_tokens and stop_ids, so it is the digest it had before they existed
+        (check() refuses a yes/no job that sets them)."""
         d = asdict(self)
         d.pop("job_id")
         d["model"] = model_name(self.model)
+        if not self.generate:
+            for k in ("kind", "max_tokens", "stop_ids"):
+                d.pop(k)
         return h(json.dumps(d, sort_keys=True).encode())
 
     def check(self, vocab: int | None = None) -> None:
         """Raise ValueError for a job no run can answer right, before anyone spends a run on
         it: one token for both answers (it would always say NO), a prompt longer than the KV
-        cache, token ids outside the model's vocabulary."""
-        if self.yes_id == self.no_id:
-            raise ValueError(f"the yes and no tokens are the same ({self.yes_id})")
+        cache, token ids outside the model's vocabulary; for a generate job, no tokens to
+        decode, or a prompt and answer longer than the KV cache."""
+        if self.generate:
+            if self.max_tokens < 1:
+                raise ValueError(f"max_tokens {self.max_tokens}: a generate job decodes at "
+                                 "least one token")
+            if len(self.prompt_ids) + self.max_tokens > self.cap:
+                raise ValueError(f"{len(self.prompt_ids)} prompt tokens and {self.max_tokens} "
+                                 f"to generate do not fit a KV cache of {self.cap}")
+        else:
+            if self.max_tokens or self.stop_ids:
+                raise ValueError("max_tokens and stop_ids are for generate jobs (kind "
+                                 "\"generate\"), not yes/no ones")
+            if self.yes_id == self.no_id:
+                raise ValueError(f"the yes and no tokens are the same ({self.yes_id})")
         if not self.prompt_ids:
             raise ValueError("the prompt is empty")
         if self.chunk < 1:
@@ -84,7 +126,8 @@ class Job:
         if len(self.prompt_ids) > self.cap:
             raise ValueError(f"{len(self.prompt_ids)} prompt tokens do not fit a KV cache of "
                              f"{self.cap}")
-        ids = list(self.prompt_ids) + [self.yes_id, self.no_id]
+        ids = list(self.prompt_ids) + (list(self.stop_ids) if self.generate
+                                       else [self.yes_id, self.no_id])
         bad = [t for t in ids if t < 0 or (vocab is not None and t >= vocab)]
         if bad:
             raise ValueError(f"token ids outside the vocabulary ({vocab}): {bad[:5]}")
@@ -227,15 +270,34 @@ def layers_of(spec) -> int:
 
 
 # ------------------------------------------------------------------------------- jobs
-def new_job(model: str, question: str, job_id: str = "", every: int = EVERY) -> Job:
+def new_job(model: str, question: str, job_id: str = "", every: int = EVERY,
+            kind: str = "yesno", max_tokens: int = 16, stop_ids=None) -> Job:
     """An oracle job: the question in the model's chat template, answered Yes or No (every:
-    the trace's checkpoint interval)."""
+    the trace's checkpoint interval). kind "generate": the question in the chat template
+    with no system line, answered by up to max_tokens greedily decoded tokens, stopping at
+    stop_ids (default: the tokenizer's end-of-sequence tokens; the tiny model: none)."""
+    if kind not in KINDS:
+        raise ValueError(f"kind {kind!r} is not one of {KINDS}")
+    gen = kind == "generate"
     if is_tiny(model):
         ids = [1 + (b % 500) for b in question.encode()][:24] or [1]
+        if gen:
+            return Job(model, ids, 0, 0, question=question, job_id=job_id,
+                       nonce=new_nonce(), every=every, kind=kind, max_tokens=max_tokens,
+                       stop_ids=list(stop_ids or []))
         return Job(model, ids, yes_id=3, no_id=4, question=question, job_id=job_id,
                    nonce=new_nonce(), every=every)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(model)
+    if gen:
+        ids = tok.apply_chat_template([{"role": "user", "content": question}],
+                                      add_generation_prompt=True, tokenize=True)
+        ids = list(ids["input_ids"] if hasattr(ids, "keys") else ids)
+        if stop_ids is None:
+            eos = tok.eos_token_id
+            stop_ids = [] if eos is None else ([eos] if isinstance(eos, int) else list(eos))
+        return Job(model, ids, 0, 0, question=question, job_id=job_id, nonce=new_nonce(),
+                   every=every, kind=kind, max_tokens=max_tokens, stop_ids=list(stop_ids))
     msg = [{"role": "system", "content": "Answer with exactly one word: Yes or No."},
            {"role": "user", "content": question}]
     ids = tok.apply_chat_template(msg, add_generation_prompt=True, tokenize=True)
@@ -253,7 +315,73 @@ def new_job(model: str, question: str, job_id: str = "", every: int = EVERY) -> 
 class Run:
     receipt: Receipt
     log: TraceLog
-    logits: np.ndarray
+    logits: np.ndarray           # the last logits (a generate job's: its last step's)
+    tokens: list = field(default_factory=list)      # a generate job's answer
+    token_cps: list = field(default_factory=list)   # a generate job: the checkpoint count
+                                 # once token i's logits were read (token i goes to the
+                                 # device in the run after that: TraceLog checkpoints)
+
+
+def greedy(logits, vocab: int | None = None) -> int:
+    """The argmax over the model's vocabulary, ties to the lowest token id (np.argmax's
+    first maximum)."""
+    v = np.asarray(logits, np.float32).reshape(-1)
+    return int(np.argmax(v[:vocab] if vocab else v))
+
+
+def gen_answer(ids) -> str:
+    """A generate job's answer as a receipt keeps it: "GEN:" and the ids, comma-separated."""
+    return "GEN:" + ",".join(str(int(t)) for t in ids)
+
+
+def answer_ids(answer: str) -> list[int] | None:
+    """The token ids of a generate answer (None: not a canonical gen_answer string)."""
+    if not answer.startswith("GEN:"):
+        return None
+    try:
+        ids = [int(t) for t in answer[4:].split(",")] if answer[4:] else []
+    except ValueError:
+        return None
+    if gen_answer(ids) != answer or any(not 0 <= t < 2 ** 32 for t in ids):
+        return None
+    return ids
+
+
+def answer_bytes(answer: str) -> bytes:
+    """What the fingerprint hashes for an answer: YES / NO as they are; a generate answer as
+    b"GEN" + each id as a u32 LE. A string that is neither (a malformed receipt) hashes as
+    its own text, which no honest run's fingerprint matches."""
+    ids = answer_ids(answer)
+    if ids is None:
+        return answer.encode()
+    return GEN_TAG + np.asarray(ids, "<u4").tobytes()
+
+
+class StopEarly:
+    """A generating provider's shortcut: stop after `after` tokens, as if a stop token came
+    (fewer decode runs). Its trace is honest about what it ran, so it ends early."""
+
+    def __init__(self, after: int):
+        self.after = int(after)
+
+    def pick(self, i: int, honest: int) -> int | None:
+        return None if i >= self.after else honest
+
+
+class WrongToken:
+    """A generating provider's shortcut or slip: at token `at`, emit `token` (default: the
+    honest one + 1) instead of the argmax, and go on decoding from it."""
+
+    def __init__(self, at: int, token: int | None = None):
+        self.at, self.token = int(at), token
+
+    def pick(self, i: int, honest: int) -> int | None:
+        if i != self.at:
+            return honest
+        return honest + 1 if self.token is None else int(self.token)
+
+
+GEN_CHEATS = (StopEarly, WrongToken)
 
 
 def build_hash(model: str, wformat: str = "int8", cap: int = 256, loaded=None) -> str:
@@ -307,6 +435,11 @@ def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
     local tries only; check_registry: refuse a build whose image hash is not the registered
     one, before running anything; tests of other weights turn it off)."""
     from opentpu.llm.qwen3 import Engine    # (every Spec's engine: Qwen3, LFM2, ...)
+    gen_cheat = cheat if isinstance(cheat, GEN_CHEATS) else None
+    if gen_cheat is not None:
+        if not job.generate:
+            raise ValueError(f"{type(cheat).__name__} is a cheat for generate jobs")
+        cheat = None
     job.check_nonce()
     every = job_every(job, every)
     bind = as_binding(binding)
@@ -318,20 +451,40 @@ def run_job(job: Job, provider: str = "local", cheat: SkipLayer | None = None,
     if check_registry:
         check_build(job, eng.backend.model_hash.hex())
     logits = eng.prefill([int(t) for t in job.prompt_ids], chunk=job.chunk)
-    log.finish(eng.backend.machine.slices)  # (after the logits were read back)
     logits = np.asarray(logits, np.float32).reshape(-1)
-    answer = "YES" if logits[job.yes_id] > logits[job.no_id] else "NO"
-    mh, lh, root = eng.backend.model_hash, h(logits.tobytes()), log.root
-    fp = h(job.digest, mh, answer.encode(), lh, root)    # (fingerprint(): the same formula)
+    tokens, token_cps = [], []
+    if job.generate:
+        vocab = getattr(spec, "vocab", None)
+        steps = [logits]                    # every step's logits, in the logits hash
+        for i in range(job.max_tokens):
+            token_cps.append(len(log.checkpoints))
+            t = greedy(logits, vocab)
+            if gen_cheat is not None:
+                t = gen_cheat.pick(i, t)
+                if t is None:
+                    break
+            tokens.append(t)
+            if t in job.stop_ids or i == job.max_tokens - 1:
+                break
+            logits = np.asarray(eng.step(t), np.float32).reshape(-1)
+            steps.append(logits)
+        answer = gen_answer(tokens)
+        lh = h(*[x.tobytes() for x in steps])
+    else:
+        answer = "YES" if logits[job.yes_id] > logits[job.no_id] else "NO"
+        lh = h(logits.tobytes())
+    log.finish(eng.backend.machine.slices)  # (after the logits were read back)
+    mh, root = eng.backend.model_hash, log.root
+    fp = h(job.digest, mh, answer_bytes(answer), lh, root)  # (fingerprint(): the same formula)
     extra = {"skipped_mms": cheat.skipped} if cheat is not None else {}
     rec = Receipt(job.job_id, provider, answer, mh.hex(), lh.hex(), root.hex(), log.step,
                   len(log.checkpoints), fp.hex(), extra, bind.hex())
-    return Run(rec, log, logits)
+    return Run(rec, log, logits, tokens, token_cps)
 
 
 def fingerprint(job: Job, rec: Receipt) -> str:
     """The fingerprint a receipt's own fields give (what the program recomputes)."""
-    return h(job.digest, bytes.fromhex(rec.model_hash), rec.answer.encode(),
+    return h(job.digest, bytes.fromhex(rec.model_hash), answer_bytes(rec.answer),
              bytes.fromhex(rec.logits_hash), bytes.fromhex(rec.trace_root)).hex()
 
 

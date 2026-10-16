@@ -229,6 +229,71 @@ So the log costs about 14% on the simulator: hashing each instruction in Python
 add little to a replay (a few seconds over 4096 steps). The demo's time goes into the six
 whole runs; a verifier that only checks a receipt runs once (about 1 min for this job).
 
+### Choosing `every` (`tools/checkpoint_bench.py`)
+
+For each interval the tool runs the job honestly (time, steps, checkpoints, the `--trace`
+JSON's size), then disputes it against a provider skipping the last layer's MMs: the
+bisection's rounds, the window it lands on, the provider's revealed window (`TraceLog.reveal`
+records as JSON) and the time of the two window replays (each a whole run). Tiny model, ISA
+simulator, 4-core cloud VM; times vary by about 15% between runs. `models/LFM2.5-230M` was not
+present, so it is not in the tables.
+
+The demo question (24 tokens in runs of 8; each run about 1,300 steps):
+
+| every | run (s) | steps | checkpoints | trace (B) | rounds | window (steps) | reveal (records / KB) | 2 replays (s) |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 512 | 1.1 | 3922 | 11 | 1705 | 4 | 512 | 513 / 279 | 2.3 |
+| 1024 | 1.0 | 3922 | 7 | 1131 | 3 | 1024 | 1032 / 558 | 2.9 |
+| 2048 | 1.1 | 3922 | 5 | 843 | 3 | 1302 | 1310 / 710 | 3.0 |
+| 4096 | 1.0 | 3922 | 4 | 699 | 2 | 1302 | 1310 / 710 | 3.7 |
+| 8192 | 1.4 | 3922 | 4 | 699 | 2 | 1302 | 1310 / 710 | 2.9 |
+| 16384 | 1.1 | 3922 | 4 | 700 | 2 | 1302 | 1310 / 710 | 2.7 |
+
+A generate job, 32 tokens greedily decoded after the same prompt (each decode one run):
+
+| every | run (s) | steps | checkpoints | trace (B) | rounds | window (steps) | reveal (records / KB) | 2 replays (s) |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 512 | 4.5 | 17004 | 68 | 9946 | 7 | 512 | 513 / 279 | 8.0 |
+| 1024 | 4.6 | 17004 | 51 | 7493 | 6 | 1024 | 1032 / 558 | 9.1 |
+| 2048 | 4.2 | 17004 | 43 | 6338 | 6 | 1302 | 1310 / 710 | 8.9 |
+| 4096 | 4.2 | 17004 | 39 | 5760 | 6 | 1302 | 1310 / 710 | 9.3 |
+| 8192 | 5.0 | 17004 | 37 | 5471 | 6 | 1302 | 1310 / 710 | 8.8 |
+| 16384 | 4.0 | 17004 | 36 | 5328 | 6 | 1302 | 1310 / 710 | 8.7 |
+
+A 128-token prompt in runs of 64 (runs of about 4,500 steps, so the larger intervals show;
+not the registered tiny image, run unpinned):
+
+| every | run (s) | steps | checkpoints | trace (B) | rounds | window (steps) | reveal (records / KB) | 2 replays (s) |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 512 | 6.2 | 18694 | 42 | 6191 | 6 | 512 | 513 / 281 | 14.1 |
+| 1024 | 6.3 | 18694 | 24 | 3593 | 4 | 1024 | 1025 / 560 | 14.2 |
+| 2048 | 6.1 | 18694 | 15 | 2293 | 4 | 2048 | 2049 / 1119 | 14.8 |
+| 4096 | 5.8 | 18694 | 10 | 1570 | 4 | 4096 | 4104 / 2236 | 16.6 |
+| 8192 | 6.3 | 18694 | 8 | 1281 | 3 | 4474 | 4482 / 2443 | 15.5 |
+| 16384 | 5.9 | 18694 | 7 | 1138 | 3 | 4474 | 4482 / 2443 | 16.2 |
+
+What the numbers say:
+
+- **Run time does not depend on `every`** within the noise: a checkpoint hashes each slice's
+  TMEM and ACT RAM once, which is small next to simulating thousands of instructions.
+- **The trace file is small at any interval** (about 145 bytes per checkpoint, under 10 KB
+  here); the on-chain cost is the Merkle path, log2(checkpoints) hashes.
+- **The interval caps the window, the run length caps it too:** a window never spans a run's
+  end, so past the longest run (1,302 steps here, about 15,600 on LFM2.5-230M's prompt runs)
+  a larger `every` changes nothing.
+- **The revealed window grows linearly with it:** about 545 bytes of JSON per step, so
+  2.2 MB at 4096 and 0.56 MB at 1024; going from 4096 to 1024 costs one or two bisection
+  rounds (one transaction each).
+- **The replays' time is the whole run's,** not the window's: each side re-runs the job up to
+  the window, so the interval hardly moves it.
+
+Recommendation: **keep the default at 4096.** The data does not clearly favor a change: run
+time and replay time are flat, and a smaller interval only trades a smaller reveal (which the
+arbiter reads off-chain) for more bisection transactions; changing the default would also
+change the digest, and so the fingerprints, of every job opened with it. A market that ships windows over a slow
+link can open its jobs with `--every 1024` (a quarter of the reveal, two more rounds). The
+LFM2.5-230M rows remain to be measured with the tool where the model is downloaded.
+
 ## 8. Answer quality (LFM2.5-230M)
 
 Seven questions with known answers, run as oracle jobs on Exact Core (`run_job`), next to the

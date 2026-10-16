@@ -50,10 +50,11 @@ def _binding(a, provider: str) -> bytes:
 
 
 def cmd_job(a) -> int:
-    job = new_job(a.model, a.question, a.id, a.every)
+    job = new_job(a.model, a.question, a.id, a.every, a.kind, a.max_tokens)
     job.save(a.out)
-    print(f"job {a.id or '-'}: {len(job.prompt_ids)} prompt tokens, yes={job.yes_id} "
-          f"no={job.no_id} -> {a.out}")
+    what = (f"up to {job.max_tokens} tokens, stop={job.stop_ids}" if job.generate
+            else f"yes={job.yes_id} no={job.no_id}")
+    print(f"job {a.id or '-'}: {len(job.prompt_ids)} prompt tokens, {what} -> {a.out}")
     return 0
 
 
@@ -220,6 +221,10 @@ def main(argv=None) -> int:
     j.add_argument("--out", default="job.json")
     j.add_argument("--every", type=int, default=EVERY,
                    help="steps between trace checkpoints (part of the job)")
+    j.add_argument("--kind", choices=["yesno", "generate"], default="yesno",
+                   help="a Yes/No answer, or greedy generation (part of the job)")
+    j.add_argument("--max-tokens", type=int, default=16,
+                   help="generate: tokens to decode at most (part of the job)")
     j.set_defaults(fn=cmd_job)
 
     r = sub.add_parser("run", help="run a job as a provider and post a receipt")
