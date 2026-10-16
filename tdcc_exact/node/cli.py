@@ -62,7 +62,9 @@ def cmd_node(a) -> int:
         try:
             node = ArbiterNode(chain, owner, store, state, models,
                                missing_trace_loses=not a.missing_trace_waits,
-                               trace_grace=a.trace_grace)
+                               trace_grace=a.trace_grace,
+                               missing_window_loses=not a.missing_window_waits,
+                               window_grace=a.window_grace)
         except NotArbiter as e:
             raise SystemExit(str(e)) from None
         if a.once:
@@ -100,6 +102,12 @@ def add_parser(sub) -> argparse.ArgumentParser:
                         "(default: it loses)")
     n.add_argument("--trace-grace", type=int,
                    help="arbiter: slots after a challenge to wait for a missing trace "
+                        "(default: half the ruling window)")
+    n.add_argument("--missing-window-waits", action="store_true",
+                   help="arbiter: a provider that does not reveal its disputed window is not "
+                        "slashed (default: it loses)")
+    n.add_argument("--window-grace", type=int,
+                   help="arbiter: slots after a challenge to wait for the provider's window "
                         "(default: half the ruling window)")
     n.add_argument("--once", action="store_true", help="one pass, then exit")
     n.add_argument("--poll", type=float, default=2.0, help="seconds between passes")

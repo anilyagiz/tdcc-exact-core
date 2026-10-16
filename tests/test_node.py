@@ -475,18 +475,101 @@ def _revealed(f, job, key=J1, **kw):
     return f["chain"].jobs_[key]
 
 
-def test_arbiter_slashes_a_skipped_layer_at_the_divergence(arb, job):
+def _expected_dispute(f, job, key=J1):
+    """What verifier.dispute names for provider p's posted trace (the cheat replayed)."""
+    from tdcc_exact.backend import SkipLayer
+    from tdcc_exact.oracle import layers_of
+    from tdcc_exact.trace import Checkpoint
+    from tdcc_exact.verifier import dispute
+    j = f["chain"].jobs_[key]
+    cps = [Checkpoint.from_json(c) for c in f["store"].get_trace(j.trace_root)["checkpoints"]]
+    model = tiny_model()
+    _, d, fault = dispute(job, cps, model, replay_cheat=SkipLayer(1, layers_of(model[0])),
+                          out=lambda *a: None, binding=bytes(key))
+    return d, fault
+
+
+def test_arbiter_slashes_a_skipped_layer_at_its_first_fault(arb, job):
+    """The cheating provider reveals its window (it chains to its posts); the arbiter's
+    replay names the first faulty instruction, as verifier.dispute does."""
     f, c = arb, arb["chain"]
     _revealed(f, job, skip_layer=1)
     assert _verifier(f).run_once() == {"J1": "challenged"}
     a = _arbiter(f)
+    assert a.run_once() == {}                              # the window is not there yet
+    p = _provider(f, skip_layer=1)
+    assert p.run_once() == {"J1": "window"}
+    assert p.run_once() == {}                              # once per challenge
     assert a.run_once() == {"J1": "slashed"}
     s = a.state.get("J1")
     j = c.jobs_[J1]
+    d, fault = _expected_dispute(f, job)
     assert j.state == "Slashed" and j.ruling == (s["divergence_index"], s["fault_step"])
-    assert 0 <= s["divergence_index"] <= j.checkpoints and s["fault_step"] >= 1
-    assert "differs" in s["why"]
+    assert s["revealed"] == "verified" and s["window"] == f"{d.lo}..{d.hi}"
+    assert (s["divergence_index"], s["fault_step"]) == (d.index, fault.step)
+    assert d.lo < fault.step <= d.hi and "first fault" in s["why"]
     assert _arbiter(f).run_once() == {}                    # a restart rules once
+
+
+def test_arbiter_slashes_a_withheld_window_after_the_grace(arb, job):
+    f, c = arb, arb["chain"]
+    j = _revealed(f, job, skip_layer=1)
+    assert _verifier(f).run_once() == {"J1": "challenged"}
+    assert _provider(f, skip_layer=1, reveal_windows=False).run_once() == {"J1": "withheld"}
+    assert _arbiter(f).run_once() == {}                    # within the default grace: wait
+    lenient = _arbiter(f, window_grace=0, missing_window_loses=False)
+    assert lenient.run_once() == {"J1": "no-window"} and j.state == "Challenged"
+    (f["dir"] / "arb" / "state.json").unlink()
+    c.now = j.challenge_slot + (j.ruling_deadline - j.challenge_slot) // 2
+    a = _arbiter(f)
+    assert a.run_once() == {"J1": "slashed"}
+    s = a.state.get("J1")
+    d, _ = _expected_dispute(f, job)
+    assert s["revealed"] == "missing" and "did not reveal" in s["why"]
+    assert j.ruling == (d.index, d.lo + 1)
+
+
+def test_arbiter_slashes_a_window_that_does_not_chain(arb, job):
+    """A window the provider signed but did not commit to (one register changed)."""
+    from tdcc_exact.node.common import window_topic
+    from tdcc_exact.node.store import sign_note, signed_key
+    f = arb
+    j = _revealed(f, job, skip_layer=1)
+    assert _verifier(f).run_once() == {"J1": "challenged"}
+    assert _provider(f, skip_layer=1).run_once() == {"J1": "window"}
+    d, _ = _expected_dispute(f, job)
+    topic = window_topic(d.lo, d.hi)
+    key = signed_key(topic, J1, f["provider"].pubkey())
+    body = f["store"].get_signed(key)["body"]
+    r = next(r for r in body["records"] if r["type"] == "step")
+    r["regs"] = "ff" + r["regs"][2:]
+    (f["dir"] / "store" / "signed" / f"{key}.json").write_text(
+        json.dumps(sign_note(f["provider"], topic, J1, body)))
+    a = _arbiter(f)
+    assert a.run_once() == {"J1": "slashed"} and j.state == "Slashed"
+    s = a.state.get("J1")
+    assert s["revealed"] == "bad" and "does not chain" in s["why"]
+    assert j.ruling == (d.index, d.lo + 1)
+
+
+def test_an_honest_provider_reveals_against_a_wrong_challenger(arb, job):
+    """A challenger whose published trace is wrong (a skipped layer's): the honest provider
+    reveals its window against it, and the arbiter, whose run agrees with the provider's,
+    dismisses."""
+    from tdcc_exact.backend import SkipLayer
+    from tdcc_exact.node.store import sign_note
+    f, c = arb, arb["chain"]
+    j = _revealed(f, job)
+    bad = run_job(job, "v", SkipLayer(1, 2), model=tiny_model(), binding=bytes(J1))
+    root = f["store"].put_trace(bad.log.to_json())
+    f["store"].put_signed(sign_note(f["verifier"], "challenge", J1, {"trace_root": root}))
+    c.challenge(f["verifier"], J1, bytes.fromhex(bad.receipt.fingerprint))
+    p = _provider(f)
+    assert p.run_once() == {"J1": "window"}
+    assert p.state.get("J1")["window"] != "none"
+    a = _arbiter(f)
+    assert a.run_once() == {"J1": "dismissed"} and j.state == "Revealed"
+    assert "honest run" in a.state.get("J1")["why"]
 
 
 def test_arbiter_dismisses_a_wrong_challenge(arb, job):
