@@ -66,10 +66,11 @@ every market's vault. On any cluster with real funds:
 
 ## Initialize a market
 
-A market is one `Config` account, derived from the admin's key. The admin is also the
-arbiter: it signs every `slash` and `dismiss`. Neither the admin nor the parameters can be
-changed after `initialize`; a change means a new market (a new admin key) and moving
-providers and renters to it.
+A market is one `Config` account, derived from the admin's key. The arbiter, which signs
+every `slash` and `dismiss`, is a key of its own (the admin's unless set), and the admin can
+replace it at any time with `set_arbiter`. The admin and the other parameters cannot be
+changed after `initialize`; a change means a new market (a new admin key) and moving providers
+and renters to it.
 
 From Python ([`tdcc_exact/chain.py`](../tdcc_exact/chain.py)); the client knows `devnet` and
 `localnet`, and takes any other RPC with `rpc=` (or `TDCC_EXACT_RPC`):
@@ -87,12 +88,16 @@ m.initialize(Pubkey.from_string("<treasury owner>"), Params(
     challenge_window=9_000,     # slots after the reveal
     min_stake=1_000_000_000,    # base units (1,000 USDC)
     unstake_cooldown=432_000,   # slots
+    challenge_bond=10_000_000,  # a verifier's deposit per challenge (10 USDC)
+    arbiter_window=216_000,     # slots the arbiter has to rule (about a day)
+    arbiter=Pubkey.from_string("<arbiter multisig>"),
+    non_reveal_penalty=20_000_000,  # stake to the renter for a commit never revealed
 ))
 ```
 
 `initialize` creates the treasury's associated token account for the treasury owner, and the
-vault. It refuses shares above 10,000 bps, a zero commit or challenge window, and a zero
-minimum stake.
+vault. It refuses shares above 10,000 bps, a zero window, stake or bond, and an unstake
+cooldown that does not outlast a job (below).
 
 ### Choosing the windows
 
@@ -107,16 +112,22 @@ model.
   land a challenge. A verifier on the simulator takes about a minute per LFM2.5-230M job
   ([exact.md](exact.md#7-overhead-of-the-log)) and has a queue; the window should cover the
   queue, not one job.
-- **The ruling**: the arbiter has no deadline in the program. Decide one as a policy and
-  monitor it ([Monitoring](#monitoring)).
+- **`arbiter_window`**: the arbiter's time to rule after a challenge. After it, anyone can
+  dismiss and the receipt stands, so it must cover the arbiter's re-run, the bisection and a
+  multisig's signing round.
+- **`challenge_bond`**: large enough that challenging honest receipts at random costs more than
+  it annoys, small enough that an honest verifier risks it; a dismissed challenge pays it to
+  the provider.
+- **`non_reveal_penalty`**: what a provider pays the renter for committing and then
+  withholding its reveal; at least the price of a typical job.
 - **`unstake_cooldown`**: longer than the whole life of a job:
 
       unstake_cooldown > commit_window (commit) + commit_window (reveal)
-                         + challenge_window + the arbiter's ruling time
+                         + challenge_window + arbiter_window
 
-  The program also refuses an unstake while the provider has open jobs, so the cooldown is a
-  second guard; choose it as if it were the only one. With the example: 3,000 + 3,000 + 9,000 +
-  216,000 (a day for the ruling) = 231,000 slots, and 432,000 (about two days) leaves margin.
+  `initialize` enforces it (`Params.job_life`). The program also refuses an unstake while the
+  provider has open jobs, so the cooldown is a second guard. With the example: 3,000 + 3,000 +
+  9,000 + 216,000 = 231,000 slots, and 432,000 (about two days) leaves margin.
 
 The demo's values (`Params` defaults: 8, 8, cooldown 50; `tdcc-exact demo --localnet`: 100 and
 60; CI: 60 and 30) are for a test validator and are far too short for a market.
@@ -140,7 +151,8 @@ readable by its owner only. Do not point `TDCC_EXACT_KEYS` inside the repository
 |:--|:--|:--|:--|
 | Program id keypair | `target/deploy/tdcc_exact-keypair.json` | claim the program address at the first deploy | backed up offline until the first deploy, then not needed |
 | Upgrade authority | the deployer's `~/.config/solana/id.json` until moved | replace the program, move every vault's tokens | a multisig ([above](#the-upgrade-authority)) |
-| Admin (arbiter) | `~/.config/tdcc-exact/<cluster>/admin.json` | slash and dismiss every challenged job of its market; seeds the market, so it cannot be rotated | offline or a hardware wallet; the client signs with a key file today, so a hardware or multisig admin needs its own signing path |
+| Arbiter | wherever its signers keep their keys | slash and dismiss challenged jobs before their ruling deadline | a multisig; rotate it with `set_arbiter` if a signer is lost |
+| Admin | `~/.config/tdcc-exact/<cluster>/admin.json` | seeds the market (cannot be rotated); appoints the arbiter | offline |
 | Treasury owner | wherever TDCC keeps its funds | spend the fees and slashed stakes | as any treasury |
 | Provider, renter, verifier | each party's own machine | that party's stake, escrow, receipts and challenges | each party's concern |
 
@@ -163,12 +175,14 @@ them live.
 | `Unstaked` | provider, amount | |
 | `JobOpened` | job, renter, provider, price, job_digest | many cheap jobs against one provider (stake locking) |
 | `ReceiptCommitted` | job, commitment | |
-| `ReceiptRevealed` | job, fingerprint, trace_root, checkpoints | verifiers should re-run each one before its challenge deadline |
-| `Challenged` | job, verifier, fingerprint | every one: the arbiter has to rule |
-| `Dismissed` | job, verifier | repeated challengers (no bond yet) |
-| `Slashed` | job, provider, verifier, refunded, to_verifier, to_tdcc, divergence_index, fault_step | every one: publish the job and the dispute so others can check it |
+| `ReceiptRevealed` | job, fingerprint, trace_root, checkpoints, answer, logits_hash | verifiers should re-run each one before its challenge deadline |
+| `Challenged` | job, verifier, fingerprint, bond, ruling_deadline | every one: the arbiter has to rule before the deadline |
+| `Dismissed` | job, verifier, bond | repeated challengers losing bonds |
+| `Slashed` | job, provider, verifier, refunded, to_verifier, to_tdcc, divergence_index, fault_step, bond | every one: publish the job and the dispute so others can check it |
 | `Settled` | job, provider, host, fee | |
-| `Expired` | job, renter, refunded | providers that let jobs expire |
+| `Expired` | job, renter, refunded, penalty | providers that let jobs expire, penalties paid |
+| `JobClosed` | job, renter, rent | |
+| `ArbiterChanged` | config, old, new | every one: only the admin can do it |
 
 Checks to run on a schedule:
 
@@ -190,16 +204,16 @@ Checks to run on a schedule:
       accepted in writing.
 - [ ] The upgrade authority on a multisig, with a written upgrade procedure; a verifiable
       build of the deployed version.
-- [ ] The admin (arbiter) key offline or behind a multisig, with a signing path for `slash`
-      and `dismiss`.
+- [ ] The arbiter on a multisig, with a signing path for `slash` and `dismiss` inside
+      `arbiter_window`; the admin key offline (it can only appoint the arbiter).
 - [ ] The market on the mainnet USDC mint (set `Market.mint` before `initialize`; check the
       address against Circle's published one), and a treasury token account TDCC controls.
 - [ ] A parameter review: windows from measured run times on the hardware the market allows,
       the unstake cooldown from the formula above, the minimum stake against the largest
       open exposure, the shares.
 - [ ] The open rows of [threat-model.md](threat-model.md#attacks) closed or accepted in
-      writing, at least: cross-job replay (per-job nonce), the challenge bond, the arbiter
-      deadline.
+      writing, at least: arbiter bias (the on-chain game), verifier selection and the
+      verifier's dilemma, trace availability.
 - [ ] Monitoring and a settler running against the market, with alerts on the checks above.
 - [ ] Incident response: a named contact who can be reached at any hour, the reporting
       channel in [SECURITY.md](../SECURITY.md), a written plan for a bad ruling, a stolen
