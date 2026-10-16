@@ -37,8 +37,10 @@ def _duration(v: str) -> float:
 
 def store_opts(a) -> dict:
     """The store server's options from the command line."""
-    from .store import AllowList
-    return dict(max_body=dict(a.max_body or []), timeout=a.timeout,
+    from .store import AllowList, load_keypair
+    return dict(mirrors=a.mirror or (),
+                mirror_key=load_keypair(a.store_key) if a.store_key else None,
+                max_body=dict(a.max_body or []), timeout=a.timeout,
                 writers=AllowList(a.writers) if a.writers else None,
                 retention=a.retention, pins=a.pins, gc_every=a.gc_every, log=print)
 
@@ -61,7 +63,8 @@ def cmd_node(a) -> int:
             print(f"{'would delete' if a.dry_run else 'deleted'} {kind}/{key}")
         print(r if a.retention is not None else f"{r} (no --retention: blobs are kept)")
         return 0
-    store = open_store(a.store, key=load_keypair(a.store_key) if a.store_key else None)
+    store = open_store(a.store, key=load_keypair(a.store_key) if a.store_key else None,
+                       quorum=a.quorum)
     if a.role == "publish":
         from ..oracle import Job
         print(store.put_job(Job.load(a.job)))
@@ -126,7 +129,11 @@ def add_parser(sub) -> argparse.ArgumentParser:
     n.add_argument("--keys", help="keypair directory (the node's key, admin.json)")
     n.add_argument("--name", help="the node's key name in --keys (default: the role)")
     n.add_argument("--admin", help="the market admin's public key (default: KEYS/admin.json)")
-    n.add_argument("--store", default="http://127.0.0.1:8787", help="store URL or directory")
+    n.add_argument("--store", default="http://127.0.0.1:8787",
+                   help="store URL or directory; several, comma-separated, are written to a "
+                        "quorum of and read from the first with a good copy")
+    n.add_argument("--quorum", type=int, help="with several --store: writes that must "
+                                              "succeed (default: a majority)")
     n.add_argument("--store-key", help="keypair file that signs the node's PUTs (for a store "
                                        "started with --writers)")
     n.add_argument("--state", help="state file (default: KEYS/<name>.state/state.json)")
@@ -164,6 +171,9 @@ def add_parser(sub) -> argparse.ArgumentParser:
                    help="store, gc: keys (hex, one per line) never deleted")
     n.add_argument("--gc-every", type=_duration, default=3600.0,
                    help="store: seconds between gc passes (default 1h)")
+    n.add_argument("--mirror", action="append", metavar="URL",
+                   help="store: push every newly accepted blob to this store too "
+                        "(repeatable; signed with --store-key if given)")
     n.add_argument("--dry-run", action="store_true", help="gc: report, delete nothing")
     n.add_argument("--job", help="publish: the Job JSON file")
     n.set_defaults(fn=cmd_node)

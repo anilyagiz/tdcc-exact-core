@@ -19,6 +19,18 @@ def job():
     return new_job("tiny", "Will it rain tomorrow?", "n1", every=EVERY)
 
 
+@pytest.fixture(scope="module")
+def trace_and_note(job):
+    from tdcc_exact.oracle import run_job, tiny_model
+    trace = run_job(job, "A", model=tiny_model()).log.to_json()
+    try:
+        from solders.keypair import Keypair
+    except ImportError:
+        return trace, None
+    from tdcc_exact.node.store import sign_note
+    return trace, sign_note(Keypair(), "challenge", bytes([5]) * 32, {"trace_root": trace["root"]})
+
+
 @pytest.fixture
 def server(tmp_path):
     started = []
@@ -313,6 +325,120 @@ def test_cli_gc(tmp_path, job, capsys):
     assert o["retention"] == 30 * 86400 and o["gc_every"] == 900
     with pytest.raises(SystemExit):
         _node_args("store", "--retention", "soon")
+
+
+# ------------------------------------------------------------------------------- replication
+def _dead_url():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return f"http://127.0.0.1:{s.getsockname()[1]}"
+
+
+def test_quorum_writes_and_verified_reads(server, job, tmp_path):
+    from tdcc_exact.node.store import NotFound, QuorumError, StoreClient, Tampered, Unavailable
+    da, db = DirStore(tmp_path / "a"), DirStore(tmp_path / "b")
+    _, ua = server(da)
+    _, ub = server(db)
+    dead = _dead_url()
+    k = job.digest.hex()
+    # 2 of 3 with one down: the write succeeds and lands on both live stores
+    c = StoreClient([ua, ub, dead], quorum=2)
+    assert c.quorum == 2 and StoreClient([ua, ub, dead]).quorum == 2
+    assert c.put_job(job) == k
+    assert da.get_job(k) == job and db.get_job(k) == job
+    # 3 of 3: the dead one fails the write
+    with pytest.raises(QuorumError):
+        StoreClient([ua, ub, dead], quorum=3).put_job(new_job("tiny", "Q3?", every=EVERY))
+    # a bad blob is refused before any store sees it
+    with pytest.raises(Tampered):
+        c.put_raw("jobs", k, job_json(new_job("tiny", "Other?", every=EVERY)))
+    # reads: the first store lies, the client skips to the next with a good copy
+    (tmp_path / "a" / "jobs" / f"{k}.json").write_bytes(
+        job_json(new_job("tiny", "Lie?", every=EVERY)))
+    assert StoreClient([ua, ub]).get_job(k) == job
+    assert StoreClient([dead, ub]).get_job(k) == job
+    # nobody has it: NotFound only when every store answered; a dead one makes it Unavailable
+    with pytest.raises(NotFound):
+        StoreClient([ua, ub]).get_job("cd" * 32)
+    with pytest.raises(Unavailable):
+        StoreClient([ua, dead]).get_job("cd" * 32)
+    with pytest.raises(Tampered):
+        StoreClient([ua]).get_job(k)
+    with pytest.raises(StoreError):
+        StoreClient([ua, ub], quorum=3)
+
+
+def test_open_store_with_several(server, tmp_path, job):
+    from tdcc_exact.node.store import StoreClient, open_store
+    _, ua = server()
+    c = open_store(f"{ua}, {tmp_path / 'local'}", quorum=2)
+    assert isinstance(c, StoreClient) and c.quorum == 2
+    c.put_job(job)
+    assert DirStore(tmp_path / "local").get_job(job.digest) == job
+
+
+def test_mirror_pushes_accepted_blobs(server, job, trace_and_note, tmp_path):
+    db = DirStore(tmp_path / "b")
+    _, ub = server(db)
+    srv, ua = server(DirStore(tmp_path / "a"), mirrors=[ub, _dead_url()])
+    trace, note = trace_and_note
+    c = HttpStore(ua)
+    c.put_job(job)
+    c.put_trace(trace)
+    if note:
+        c.put_signed(note)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            db.get_job(job.digest)
+            db.get_trace(trace["root"])
+            break
+        except StoreError:
+            time.sleep(0.05)
+    assert db.get_job(job.digest) == job
+    assert db.get_trace(trace["root"])["checkpoints"] == trace["checkpoints"]
+    if note:
+        while not list((tmp_path / "b" / "signed").glob("*.json")):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+
+
+def test_mirrors_in_a_ring_do_not_loop(server, job, tmp_path):
+    # a mirrors to b and b to a: b already holding what a pushes, it pushes nothing back
+    ua_planned = _dead_url()                         # a free port, for a to listen on
+    port_a = int(ua_planned.rsplit(":", 1)[1])
+    srv_b, ub = server(DirStore(tmp_path / "b"), mirrors=[ua_planned])
+    srv_a, ua = start(DirStore(tmp_path / "a"), port=port_a, mirrors=[ub])
+    try:
+        HttpStore(ua).put_job(job)
+        srv_a.mirror.join()
+        srv_b.mirror.join()
+        assert DirStore(tmp_path / "b").get_job(job.digest) == job
+        assert DirStore(tmp_path / "a").get_job(job.digest) == job
+    finally:
+        srv_a.shutdown()
+
+
+def test_mirror_signs_for_an_allow_listed_mirror(server, job, tmp_path):
+    pytest.importorskip("solders")
+    from solders.keypair import Keypair
+
+    from tdcc_exact.node.store import AllowList
+    k = Keypair()
+    (tmp_path / "w").write_text(f"{k.pubkey()}\n")
+    db = DirStore(tmp_path / "b")
+    _, ub = server(db, writers=AllowList(tmp_path / "w"))
+    srv, ua = server(mirrors=[ub], mirror_key=k)
+    HttpStore(ua).put_job(job)
+    srv.mirror.join()
+    assert db.get_job(job.digest) == job
+
+
+def test_cli_mirror_and_quorum(tmp_path):
+    from tdcc_exact.node.cli import store_opts
+    o = store_opts(_node_args("store", "--mirror", "http://a:1", "--mirror", "http://b:2"))
+    assert list(o["mirrors"]) == ["http://a:1", "http://b:2"] and o["mirror_key"] is None
+    assert _node_args("publish", "--store", "http://a:1,http://b:2", "--quorum", "1").quorum == 1
 
 
 def _node_args(*argv):

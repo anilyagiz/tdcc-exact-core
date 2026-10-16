@@ -27,12 +27,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -450,9 +452,96 @@ class HttpStore:
         return signed_from_json(self.get_raw("signed", k), k)
 
 
-def open_store(where: str, key=None):
+class QuorumError(StoreError):
+    """Fewer stores than the quorum took a write."""
+
+
+class StoreClient:
+    """Several stores as one: a write goes to all of them at once and succeeds when `quorum`
+    (default: a majority) have taken it; a read tries them in order and returns the first
+    blob that hashes to its key, so a store that is down, lacks the blob or lies is skipped.
+
+    A read is NotFound only when every store answered and none had a good copy; when one
+    could not be reached the error is Unavailable, so a node retries rather than concluding
+    a blob was never published."""
+
+    def __init__(self, stores, quorum: int | None = None, key=None):
+        self.stores = [open_store(s, key=key) if isinstance(s, str) else s for s in stores]
+        if not self.stores:
+            raise StoreError("no stores")
+        n = len(self.stores)
+        self.quorum = n // 2 + 1 if quorum is None else quorum
+        if not 1 <= self.quorum <= n:
+            raise StoreError(f"quorum {self.quorum} of {n} stores")
+        self._pool = ThreadPoolExecutor(max_workers=n, thread_name_prefix="store-put")
+
+    def _where(self, s) -> str:
+        return getattr(s, "url", None) or str(getattr(s, "path", s))
+
+    def put_raw(self, kind: str, key, raw: bytes) -> None:
+        CHECK[kind](raw, key)                          # a bad blob goes nowhere
+        futs = {self._pool.submit(s.put_raw, kind, key, raw): s for s in self.stores}
+        ok, errors = 0, []
+        for f in as_completed(futs):
+            try:
+                f.result()
+                ok += 1
+            except (StoreError, OSError) as e:
+                errors.append(f"{self._where(futs[f])}: {e}")
+            if ok >= self.quorum:
+                return                                 # the rest finish in the background
+            if len(errors) > len(self.stores) - self.quorum:
+                break
+        raise QuorumError(f"{NAME[kind]} {_key(key)[:16]}..: {ok} of {len(self.stores)} "
+                          f"stores took it, {self.quorum} needed; " + "; ".join(errors))
+
+    def get_raw(self, kind: str, key) -> bytes:
+        k, errors = _key(key), []
+        for s in self.stores:
+            try:
+                raw = s.get_raw(kind, k)
+                CHECK[kind](raw, k)
+                return raw
+            except (StoreError, OSError) as e:
+                errors.append(e)
+        msg = f"{NAME[kind]} {k[:16]}..: " + "; ".join(
+            f"{self._where(s)}: {e}" for s, e in zip(self.stores, errors))
+        if all(isinstance(e, Tampered) for e in errors):
+            raise Tampered(msg)
+        if all(isinstance(e, (NotFound, Tampered)) for e in errors):
+            raise NotFound(msg)
+        raise Unavailable(msg)
+
+    def put_job(self, job: Job) -> str:
+        k = job.digest.hex()
+        self.put_raw("jobs", k, job_json(job))
+        return k
+
+    def get_job(self, key) -> Job:
+        return job_from_json(self.get_raw("jobs", key), key)
+
+    def put_trace(self, trace: dict) -> str:
+        k = trace_root(trace)
+        self.put_raw("traces", k, json.dumps(trace).encode())
+        return k
+
+    def get_trace(self, key) -> dict:
+        return trace_from_json(self.get_raw("traces", key), key)
+
+    def put_signed(self, note: dict) -> str:
+        k = signed_key(note["topic"], note["job"], note["signer"])
+        self.put_raw("signed", k, json.dumps(note).encode())
+        return k
+
+    def get_signed(self, key) -> dict:
+        return signed_from_json(self.get_raw("signed", key), key)
+
+
+def open_store(where: str, key=None, quorum: int | None = None):
     """An http(s):// URL is a store server (PUTs signed by `key` if given); anything else a
-    directory."""
+    directory. Several, comma-separated, are one StoreClient (quorum: a majority)."""
+    if "," in where:
+        return StoreClient([w.strip() for w in where.split(",") if w.strip()], quorum, key)
     return HttpStore(where, key=key) if re.match(r"^https?://", where) else DirStore(where)
 
 
@@ -473,7 +562,7 @@ class _Refuse(Exception):
 
 def _handler(store: DirStore, opts: dict):
     limits = {**LIMITS, **(opts.get("max_body") or {})}
-    writers = opts.get("writers")
+    writers, mirror = opts.get("writers"), opts.get("mirror")
 
     class H(BaseHTTPRequestHandler):
         timeout = opts.get("timeout", TIMEOUT)      # socket timeout: a stalled client is cut off
@@ -554,7 +643,8 @@ def _handler(store: DirStore, opts: dict):
                 if signer is not None and not verify_put(signer, self.headers[SIGNATURE],
                                                          kind, key, raw):
                     raise _Refuse(403, "the signature is not the signer's over this PUT")
-                store.put_raw(kind, key, raw)
+                if store.put_raw(kind, key, raw) and mirror is not None:
+                    mirror.push(kind, key)
                 self._send(200, b'{"ok": true}')
             self._do(put)
 
@@ -567,11 +657,66 @@ def _handler(store: DirStore, opts: dict):
 class StoreServer(ThreadingHTTPServer):
     daemon_threads = True
     _stop: threading.Event | None = None
+    mirror: Mirror | None = None
 
     def shutdown(self) -> None:
         if self._stop is not None:
             self._stop.set()
         super().shutdown()
+
+
+class Mirror:
+    """Pushes each blob the server newly accepts to other stores, one worker per mirror (a
+    dead one delays no other), retrying with backoff. Blobs stored before it started are not
+    pushed; a mirror that refuses a blob as tampered or too large is not retried."""
+
+    def __init__(self, store: DirStore, urls, key=None, stop: threading.Event | None = None,
+                 tries: int = 6, backoff: float = 1.0, log=None):
+        self.store, self.tries, self.backoff, self.log = store, tries, backoff, log
+        self.stop = stop or threading.Event()
+        self.queues = []
+        for url in urls:
+            q: queue.Queue = queue.Queue()
+            self.queues.append(q)
+            threading.Thread(target=self._work, args=(HttpStore(url, key=key), q),
+                             daemon=True).start()
+
+    def push(self, kind: str, key: str) -> None:
+        for q in self.queues:
+            q.put((kind, key))
+
+    def join(self) -> None:
+        """Wait until every queued push is done (delivered or given up)."""
+        for q in self.queues:
+            q.join()
+
+    def _work(self, dst: HttpStore, q: queue.Queue) -> None:
+        while not self.stop.is_set():
+            try:
+                kind, key = q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                self._send(dst, kind, key)
+            finally:
+                q.task_done()
+
+    def _send(self, dst: HttpStore, kind: str, key: str) -> None:
+        for i in range(self.tries):
+            try:
+                dst.put_raw(kind, key, self.store.get_raw(kind, key))
+                return
+            except NotFound:
+                return                                  # gc took it meanwhile
+            except (Tampered, TooLarge, Unauthorized) as e:
+                err = e
+                break                                   # retrying will not help
+            except (StoreError, OSError) as e:
+                err = e
+                if self.stop.wait(min(60.0, self.backoff * 2 ** i)):
+                    return
+        if self.log:
+            self.log(f"mirror {dst.url}: gave up on {kind}/{key}: {err}")
 
 
 def parse_duration(v: str) -> float:
@@ -601,7 +746,8 @@ def _gc_loop(store: DirStore, stop: threading.Event, retention, pins, every: flo
 def serve(store: DirStore, host: str = "127.0.0.1", port: int = 8787, *,
           max_body: dict | None = None, timeout: float = TIMEOUT,
           writers=None, retention: float | None = None, pins=None,
-          gc_every: float = 3600.0, log=None) -> StoreServer:
+          gc_every: float = 3600.0, mirrors=(), mirror_key=None,
+          log=None) -> StoreServer:
     """A store server (not started: call .serve_forever(), or `start` for a thread).
 
     max_body  {kind: bytes} over LIMITS: a larger PUT gets 413 before its body is read
@@ -612,10 +758,14 @@ def serve(store: DirStore, host: str = "127.0.0.1", port: int = 8787, *,
     retention seconds to keep a blob after it was last stored (None: forever); a gc pass
               runs at start (it also clears crashed writes' temp files) and every gc_every
     pins      keys gc never deletes: a set, or a pin file (re-read each pass)
+    mirrors   store URLs each newly accepted blob is pushed to (srv.mirror; PUTs signed by
+              mirror_key if given)
     """
+    stop = threading.Event()
+    mirror = Mirror(store, mirrors, mirror_key, stop, log=log) if mirrors else None
     srv = StoreServer((host, port), _handler(store, dict(max_body=max_body, timeout=timeout,
-                                                         writers=writers)))
-    srv._stop = threading.Event()
+                                                         writers=writers, mirror=mirror)))
+    srv._stop, srv.mirror = stop, mirror
     threading.Thread(target=_gc_loop, args=(store, srv._stop, retention, pins, gc_every, log),
                      daemon=True).start()
     return srv
