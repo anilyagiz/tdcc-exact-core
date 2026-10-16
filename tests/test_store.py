@@ -1,6 +1,7 @@
 """The job/trace store under production conditions: limits, write authorization, retention,
 replication and concurrency (tests/test_node.py has the round trips)."""
 import http.client
+import json
 import socket
 import time
 
@@ -134,6 +135,69 @@ def test_an_unreachable_store_is_a_store_error():
         port = s.getsockname()[1]
     with pytest.raises(Unavailable):
         HttpStore(f"http://127.0.0.1:{port}", timeout=2).get_job("ab" * 32)
+
+
+# ------------------------------------------------------------------------------- write auth
+def test_signed_writes(server, job, tmp_path):
+    pytest.importorskip("solders")
+    from solders.keypair import Keypair
+
+    from tdcc_exact.node.store import AllowList, Unauthorized, sign_put
+    ok, other = Keypair(), Keypair()
+    allow = tmp_path / "writers"
+    allow.write_text(f"# the renter\n{ok.pubkey()}\n")              # base58
+    srv, url = server(writers=AllowList(allow))
+    k = job.digest.hex()
+    with pytest.raises(Unauthorized):                               # unsigned: 401
+        HttpStore(url).put_job(job)
+    assert _raw(url, "PUT", f"/job/{k}", job_json(job))[0] == 401
+    with pytest.raises(Unauthorized):                               # not listed: 403
+        HttpStore(url, key=other).put_job(job)
+    # a listed signer's signature over another body (or key) does not carry over
+    hdr = sign_put(ok, "jobs", k, b"{}")
+    assert _raw(url, "PUT", f"/job/{k}", job_json(job), hdr)[0] == 403
+    hdr = sign_put(ok, "traces", k, job_json(job))
+    assert _raw(url, "PUT", f"/job/{k}", job_json(job), hdr)[0] == 403
+    hdr = dict(sign_put(other, "jobs", k, job_json(job)), **{"X-Tdcc-Signer": str(ok.pubkey())})
+    assert _raw(url, "PUT", f"/job/{k}", job_json(job), hdr)[0] == 403
+    assert HttpStore(url, key=ok).put_job(job) == k                 # listed and signed
+    assert HttpStore(url).get_job(k) == job                         # reads stay open
+    # the list is re-read when it changes: add `other` in hex, without a restart
+    time.sleep(0.01)
+    allow.write_text(f"{ok.pubkey()}\n{bytes(other.pubkey()).hex()}  # a provider\n")
+    HttpStore(url, key=other).put_job(new_job("tiny", "Other?", every=EVERY))
+
+
+def test_an_open_store_ignores_signatures(server, job):
+    pytest.importorskip("solders")
+    from solders.keypair import Keypair
+    srv, url = server()
+    assert HttpStore(url, key=Keypair()).put_job(job) == job.digest.hex()
+
+
+def test_a_bad_allow_list_fails_at_start(tmp_path):
+    from tdcc_exact.node.store import AllowList
+    (tmp_path / "w").write_text("not-a-key!\n")
+    with pytest.raises(StoreError):
+        AllowList(tmp_path / "w")
+
+
+def test_cli_writers_and_store_key(tmp_path, job, server):
+    pytest.importorskip("solders")
+    from solders.keypair import Keypair
+
+    from tdcc_exact.cli import main
+    from tdcc_exact.node.cli import store_opts
+    k = Keypair()
+    (tmp_path / "k.json").write_text(json.dumps(list(bytes(k))))
+    (tmp_path / "w").write_text(f"{k.pubkey()}\n")
+    opts = store_opts(_node_args("store", "--writers", str(tmp_path / "w")))
+    srv, url = server(**opts)
+    job.save(tmp_path / "job.json")
+    with pytest.raises(StoreError):
+        main(["node", "publish", "--job", str(tmp_path / "job.json"), "--store", url])
+    assert main(["node", "publish", "--job", str(tmp_path / "job.json"), "--store", url,
+                 "--store-key", str(tmp_path / "k.json")]) == 0
 
 
 def _node_args(*argv):

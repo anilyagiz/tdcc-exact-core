@@ -28,11 +28,13 @@ def _limit(v: str) -> tuple[str, int]:
 
 def store_opts(a) -> dict:
     """The store server's options from the command line."""
-    return dict(max_body=dict(a.max_body or []), timeout=a.timeout)
+    from .store import AllowList
+    return dict(max_body=dict(a.max_body or []), timeout=a.timeout,
+                writers=AllowList(a.writers) if a.writers else None)
 
 
 def cmd_node(a) -> int:
-    from .store import DirStore, open_store, serve
+    from .store import DirStore, load_keypair, open_store, serve
     if a.role == "store":
         srv = serve(DirStore(a.dir), a.host, a.port, **store_opts(a))
         print(f"store: {Path(a.dir).resolve()} on http://{a.host}:{srv.server_address[1]}")
@@ -41,7 +43,7 @@ def cmd_node(a) -> int:
         except KeyboardInterrupt:
             pass
         return 0
-    store = open_store(a.store)
+    store = open_store(a.store, key=load_keypair(a.store_key) if a.store_key else None)
     if a.role == "publish":
         from ..oracle import Job
         print(store.put_job(Job.load(a.job)))
@@ -107,6 +109,8 @@ def add_parser(sub) -> argparse.ArgumentParser:
     n.add_argument("--name", help="the node's key name in --keys (default: the role)")
     n.add_argument("--admin", help="the market admin's public key (default: KEYS/admin.json)")
     n.add_argument("--store", default="http://127.0.0.1:8787", help="store URL or directory")
+    n.add_argument("--store-key", help="keypair file that signs the node's PUTs (for a store "
+                                       "started with --writers)")
     n.add_argument("--state", help="state file (default: KEYS/<name>.state/state.json)")
     n.add_argument("--models", help="directory holding the models jobs name")
     n.add_argument("--rate", type=float, default=1.0, help="verifier: share of jobs re-run")
@@ -132,6 +136,9 @@ def add_parser(sub) -> argparse.ArgumentParser:
                         "64 MiB, 4 MiB); larger ones get 413 unread")
     n.add_argument("--timeout", type=float, default=30.0,
                    help="store: seconds a client may stall a request before it is dropped")
+    n.add_argument("--writers", metavar="FILE",
+                   help="store: take PUTs only when signed by a key listed in FILE (hex or "
+                        "base58, one per line; re-read when it changes). Default: anyone")
     n.add_argument("--job", help="publish: the Job JSON file")
     n.set_defaults(fn=cmd_node)
     return n
