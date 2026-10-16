@@ -4,9 +4,10 @@ The terms used in [exact.md](exact.md), [architecture.md](architecture.md),
 [threat-model.md](threat-model.md) and [operations.md](operations.md), in alphabetical order.
 `H` is SHA-256 throughout.
 
-**Arbiter.** The key that decides a challenge by signing `slash` or `dismiss`. Today it is the
-market's admin key (TDCC); the on-chain bisection game is meant to replace it
-([TODO.md](../TODO.md) item 6).
+**Arbiter.** The key that decides a challenge by signing `slash` or `dismiss`, before the
+job's ruling deadline. It is set in the market's config (the admin's key unless given), the
+admin replaces it with `set_arbiter`, and it may not challenge. Today it decides after an
+off-chain bisection; the on-chain bisection game would replace it.
 
 **Base unit.** The smallest amount of a token. USDC has 6 decimals, so 1 USDC is 1,000,000
 base units; every price and stake in the program is in base units.
@@ -14,6 +15,10 @@ base units; every price and stake in the program is in base units.
 **Basis points (bps).** Hundredths of a percent: 10,000 bps is the whole amount. The market's
 `host_bps` (8,000) and `verifier_bps` (5,000) are in bps; shares are rounded down and the
 remainder goes to TDCC.
+
+**Binding.** The 32 bytes a run's trace starts from: the address of the on-chain Job account
+(locally, the provider's key). Two runs of the same job description for two on-chain jobs
+give two fingerprints, so a revealed fingerprint cannot be replayed on another job.
 
 **Bisection.** A binary search over two checkpoint lists for the first checkpoint that
 differs after one that agrees. It takes log2(checkpoints) rounds; in an on-chain game each
@@ -27,10 +32,13 @@ verifier's laptop can reproduce a provider's fingerprint.
 fingerprint, before the job's challenge deadline. Any key but the provider's can send it, once
 per job.
 
+**Challenge bond.** The USDC a verifier deposits with a challenge. A slash returns it with the
+verifier's share; a dismissal pays it to the provider.
+
 **Challenge window.** The number of slots after a reveal during which the receipt can be
 challenged. After it closes, an unchallenged job can be settled.
 
-**Checkpoint.** A snapshot the trace log takes every 4096 steps and at the end of each device
+**Checkpoint.** A snapshot the trace log takes every `job.every` steps (4096 by default) and at the end of each device
 run: the step count, the chain so far, and a hash of each slice's working state (TMEM, ACT
 RAM and its scales, the registers, the pc).
 
@@ -80,11 +88,21 @@ leaf count, it shows one checkpoint belongs to a posted root without the whole l
 the weights and on the build (weight format, KV cache size, design configuration), so it pins
 both.
 
+**Non-reveal penalty.** What a provider that committed and then did not reveal pays the
+renter out of its stake when the job expires.
+
+**Nonce.** A random 32-byte value in every job, part of its digest, so no two jobs share a
+digest.
+
 **Open job.** A job that is not yet `Settled`, `Slashed` or `Expired`. A provider with open
 jobs cannot unstake.
 
 **Oracle job.** A yes/no question run on a model: the answer is whichever of the Yes and No
 tokens gets the larger logit after the prompt.
+
+**Output fault.** The dispute's ruling when the two traces agree but the provider's receipt is
+not the one its trace gives: another answer, logits hash or model hash, or a fingerprint or
+trace root that is not the hash of its own parts.
 
 **Prefill chunk.** The number of prompt tokens fed in one device run (`chunk`, 8). It changes
 the trace, so it is part of the job digest.
@@ -102,6 +120,9 @@ its encoding, the chain and the slice's state after it.
 
 **Reveal.** The second phase of commit-reveal: `reveal_receipt` posts the fingerprint, the
 salt, the model hash, the trace root and the checkpoint count.
+
+**Ruling deadline.** The slot until which the arbiter can rule on a challenge
+(`arbiter_window` slots after it); after it anyone can dismiss and the receipt stands.
 
 **Settle.** Paying out an accepted job after its challenge window: `host_bps` of the price to
 the provider, the rest to the treasury. Anyone can send it.
