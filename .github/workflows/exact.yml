@@ -44,10 +44,7 @@ jobs:
             target
           key: rust-lint-${{ runner.os }}-${{ hashFiles('programs/**', 'Cargo.lock', 'Cargo.toml') }}
           restore-keys: rust-lint-${{ runner.os }}-
-      # advisory until lib.rs is formatted (one require! in challenge is not rustfmt's layout);
-      # drop continue-on-error once `cargo fmt --all` has been run on it
       - run: cargo fmt --all --check
-        continue-on-error: true
       - run: cargo clippy -p tdcc_exact --all-targets -- -D warnings
 
   python:

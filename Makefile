@@ -79,5 +79,5 @@ test-tourney:
 exact-check:
 	ruff check
 	$(PYTHON) -m pytest -q tests/test_exact.py tests/test_api.py
-	-cargo fmt --all --check   # advisory, as in CI, until lib.rs is formatted
+	cargo fmt --all --check
 	cargo clippy -p tdcc_exact --all-targets -- -D warnings

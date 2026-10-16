@@ -375,8 +375,13 @@ pub mod tdcc_exact {
         require!(answer <= 1, ExactError::BadParams);
         let trace_root = trace_root(&tree_root, checkpoints);
         require!(
-            receipt_fingerprint(&j.job_digest, &model_hash, answer, &logits_hash, &trace_root)
-                == fingerprint,
+            receipt_fingerprint(
+                &j.job_digest,
+                &model_hash,
+                answer,
+                &logits_hash,
+                &trace_root
+            ) == fingerprint,
             ExactError::BadReceipt
         );
         j.fingerprint = fingerprint;
@@ -514,9 +519,7 @@ pub mod tdcc_exact {
             &a.verifier_token,
             &a.mint,
             &a.config,
-            to_verifier
-                .checked_add(bond)
-                .ok_or(ExactError::Overflow)?,
+            to_verifier.checked_add(bond).ok_or(ExactError::Overflow)?,
         )?;
         pay_out(
             &a.token_program,
@@ -729,8 +732,8 @@ pub struct Config {
     pub challenge_window: u64,
     pub min_stake: u64,
     pub unstake_cooldown: u64,
-    pub challenge_bond: u64, // a verifier's deposit per challenge
-    pub arbiter_window: u64, // slots the arbiter has to rule on a challenge
+    pub challenge_bond: u64,     // a verifier's deposit per challenge
+    pub arbiter_window: u64,     // slots the arbiter has to rule on a challenge
     pub non_reveal_penalty: u64, // from the stake to the renter when a commit is not revealed
     pub bump: u8,
     pub vault_bump: u8,
