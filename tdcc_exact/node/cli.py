@@ -1,6 +1,7 @@
 """`tdcc-exact node provider|verifier|arbiter|store|publish`: the market's off-chain services.
 
-    tdcc-exact node store    --dir ~/tdcc-store [--host 0.0.0.0 --port 8787]
+    tdcc-exact node store    --dir ~/tdcc-store [--host 0.0.0.0 --port 8787] [--retention 30d]
+    tdcc-exact node gc       --dir ~/tdcc-store --retention 30d [--pins FILE] [--dry-run]
     tdcc-exact node publish  --job job.json --store http://host:8787        (a renter)
     tdcc-exact node provider --rpc URL --keys DIR --store http://host:8787 [--once]
     tdcc-exact node verifier --rpc URL --keys DIR --store http://host:8787 [--rate 0.2] [--once]
@@ -26,11 +27,20 @@ def _limit(v: str) -> tuple[str, int]:
     return kinds[kind], int(n)
 
 
+def _duration(v: str) -> float:
+    from .store import parse_duration
+    try:
+        return parse_duration(v)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def store_opts(a) -> dict:
     """The store server's options from the command line."""
     from .store import AllowList
     return dict(max_body=dict(a.max_body or []), timeout=a.timeout,
-                writers=AllowList(a.writers) if a.writers else None)
+                writers=AllowList(a.writers) if a.writers else None,
+                retention=a.retention, pins=a.pins, gc_every=a.gc_every, log=print)
 
 
 def cmd_node(a) -> int:
@@ -42,6 +52,14 @@ def cmd_node(a) -> int:
             srv.serve_forever()
         except KeyboardInterrupt:
             pass
+        return 0
+    if a.role == "gc":
+        from .store import load_pins
+        r = DirStore(a.dir).gc(a.retention, load_pins(a.pins) if a.pins else (),
+                               dry_run=a.dry_run)
+        for kind, key in r.deleted:
+            print(f"{'would delete' if a.dry_run else 'deleted'} {kind}/{key}")
+        print(r if a.retention is not None else f"{r} (no --retention: blobs are kept)")
         return 0
     store = open_store(a.store, key=load_keypair(a.store_key) if a.store_key else None)
     if a.role == "publish":
@@ -102,7 +120,7 @@ def add_parser(sub) -> argparse.ArgumentParser:
     n = sub.add_parser("node", help="run a market service: job store, provider, verifier or arbiter",
                        description=__doc__,
                        formatter_class=argparse.RawDescriptionHelpFormatter)
-    n.add_argument("role", choices=["provider", "verifier", "arbiter", "store", "publish"])
+    n.add_argument("role", choices=["provider", "verifier", "arbiter", "store", "gc", "publish"])
     n.add_argument("--rpc", default="http://127.0.0.1:8899", help="Solana RPC URL")
     n.add_argument("--cluster", default="localnet", help="for Explorer links only")
     n.add_argument("--keys", help="keypair directory (the node's key, admin.json)")
@@ -139,6 +157,14 @@ def add_parser(sub) -> argparse.ArgumentParser:
     n.add_argument("--writers", metavar="FILE",
                    help="store: take PUTs only when signed by a key listed in FILE (hex or "
                         "base58, one per line; re-read when it changes). Default: anyone")
+    n.add_argument("--retention", type=_duration,
+                   help="store, gc: delete blobs last stored longer ago than this (90s, 12h, "
+                        "30d, 2w). Default: keep everything")
+    n.add_argument("--pins", metavar="FILE",
+                   help="store, gc: keys (hex, one per line) never deleted")
+    n.add_argument("--gc-every", type=_duration, default=3600.0,
+                   help="store: seconds between gc passes (default 1h)")
+    n.add_argument("--dry-run", action="store_true", help="gc: report, delete nothing")
     n.add_argument("--job", help="publish: the Job JSON file")
     n.set_defaults(fn=cmd_node)
     return n

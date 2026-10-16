@@ -30,9 +30,11 @@ import os
 import re
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict
+from contextlib import suppress
+from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -237,7 +239,35 @@ def load_keypair(path):
 
 
 # ------------------------------------------------------------------------------- backends
+BLOB = re.compile(r"^([0-9a-f]{64})\.json$")
+TEMP_GRACE = 3600.0              # seconds before gc takes a temp file for a crashed write's
+
+
+def load_pins(path) -> set[str]:
+    """A pin file: keys (64 hex digits) gc never deletes, one per line, `#` comments."""
+    lines = (ln.split("#", 1)[0].strip() for ln in Path(path).read_text().splitlines())
+    return {_key(ln) for ln in lines if ln}
+
+
+@dataclass
+class GcReport:
+    deleted: list = field(default_factory=list)      # (kind, key) of blobs past retention
+    pinned: list = field(default_factory=list)       # (kind, key) past it but pinned
+    temps: list = field(default_factory=list)        # leftover temp files of crashed writes
+    kept: int = 0
+    dry_run: bool = False
+
+    def __str__(self) -> str:
+        verb = "would delete" if self.dry_run else "deleted"
+        return (f"gc: {verb} {len(self.deleted)} blobs and {len(self.temps)} temp files; "
+                f"kept {self.kept} ({len(self.pinned)} pinned past retention)")
+
+
 class DirStore:
+    """Blobs in path/<kind>/<key>.json. A write goes to a temp file (.<key>.*.tmp), is
+    fsynced, then renamed into place, so a crash leaves at most a temp file, which no read
+    sees and gc removes; never a half blob under a key."""
+
     def __init__(self, path):
         self.path = Path(path)
         for kind in CHECK:
@@ -246,25 +276,80 @@ class DirStore:
     def _file(self, kind: str, key) -> Path:
         return self.path / kind / f"{_key(key)}.json"
 
-    def _write(self, kind: str, key, raw: bytes) -> None:
+    def _write(self, kind: str, key, raw: bytes) -> bool:
+        """True if the blob is new. Storing one again refreshes its time (gc's clock)."""
         p = self._file(kind, key)
         if p.exists():
-            return                                       # content-addressed: same bytes' worth
-        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw)
-        os.replace(tmp, p)
+            try:
+                os.utime(p)
+                return False                         # content-addressed: same bytes' worth
+            except FileNotFoundError:
+                pass                                 # gc took it just now: write it again
+        fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=f".{p.stem}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, p)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(tmp)
+            raise
+        with suppress(OSError):                      # make the rename itself durable
+            d = os.open(p.parent, os.O_RDONLY)
+            try:
+                os.fsync(d)
+            finally:
+                os.close(d)
+        return True
 
     def _read(self, kind: str, key) -> bytes:
-        p = self._file(kind, key)
-        if not p.exists():
-            raise NotFound(f"no {NAME[kind]} {_key(key)}")
-        return p.read_bytes()
+        try:
+            return self._file(kind, key).read_bytes()
+        except FileNotFoundError:
+            raise NotFound(f"no {NAME[kind]} {_key(key)}") from None
 
     # raw, checked on the way in and out (the server uses these)
-    def put_raw(self, kind: str, key, raw: bytes) -> None:
+    def put_raw(self, kind: str, key, raw: bytes) -> bool:
+        """Store raw under key after checking it; True if it was not there before."""
         CHECK[kind](raw, key)
-        self._write(kind, key, raw)
+        return self._write(kind, key, raw)
+
+    def gc(self, retention: float | None = None, pins=(), dry_run: bool = False,
+           now: float | None = None, temp_grace: float = TEMP_GRACE) -> GcReport:
+        """Delete blobs last stored more than `retention` seconds ago (None: keep all),
+        except pinned keys, and temp files older than `temp_grace` (crashed writes).
+        dry_run reports what it would delete and deletes nothing."""
+        now = time.time() if now is None else now
+        pins = {_key(k) for k in pins}
+        r = GcReport(dry_run=dry_run)
+        for kind in CHECK:
+            for f in (self.path / kind).iterdir():
+                try:
+                    age = now - f.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                m = BLOB.match(f.name)
+                if m is None:
+                    if f.name.endswith(".tmp") and age > temp_grace:
+                        r.temps.append(str(f))
+                        if not dry_run:
+                            with suppress(FileNotFoundError):
+                                f.unlink()
+                    continue
+                key = m.group(1)
+                if retention is None or age <= retention:
+                    r.kept += 1
+                elif key in pins:
+                    r.pinned.append((kind, key))
+                    r.kept += 1
+                else:
+                    r.deleted.append((kind, key))
+                    if not dry_run:
+                        with suppress(FileNotFoundError):
+                            f.unlink()
+        return r
 
     def get_raw(self, kind: str, key) -> bytes:
         return self._read(kind, key)
@@ -481,11 +566,42 @@ def _handler(store: DirStore, opts: dict):
 
 class StoreServer(ThreadingHTTPServer):
     daemon_threads = True
+    _stop: threading.Event | None = None
+
+    def shutdown(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        super().shutdown()
+
+
+def parse_duration(v: str) -> float:
+    """Seconds from 90, 90s, 15m, 12h, 30d or 2w."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhdw]?)\s*", str(v))
+    if not m:
+        raise ValueError(f"not a duration: {v!r} (want e.g. 90s, 15m, 12h, 30d)")
+    return float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400,
+                                "w": 604800}[m.group(2)]
+
+
+def _gc_loop(store: DirStore, stop: threading.Event, retention, pins, every: float, log):
+    while True:
+        try:
+            # a pin file is re-read each pass, so pins can be added while the server runs
+            p = load_pins(pins) if isinstance(pins, (str, os.PathLike)) else (pins or ())
+            r = store.gc(retention, p)
+            if log and (r.deleted or r.temps):
+                log(str(r))
+        except Exception as e:  # noqa: BLE001 - a bad pin file must not stop the server
+            if log:
+                log(f"gc: {e}")
+        if stop.wait(every):
+            return
 
 
 def serve(store: DirStore, host: str = "127.0.0.1", port: int = 8787, *,
           max_body: dict | None = None, timeout: float = TIMEOUT,
-          writers=None) -> StoreServer:
+          writers=None, retention: float | None = None, pins=None,
+          gc_every: float = 3600.0, log=None) -> StoreServer:
     """A store server (not started: call .serve_forever(), or `start` for a thread).
 
     max_body  {kind: bytes} over LIMITS: a larger PUT gets 413 before its body is read
@@ -493,9 +609,16 @@ def serve(store: DirStore, host: str = "127.0.0.1", port: int = 8787, *,
     writers   None (anyone may write: every blob is checked against its key anyway), or a
               container of 32-byte public keys (an AllowList): a PUT must then be signed by
               one of them (sign_put), else 401 (unsigned) or 403 (not listed, bad signature)
+    retention seconds to keep a blob after it was last stored (None: forever); a gc pass
+              runs at start (it also clears crashed writes' temp files) and every gc_every
+    pins      keys gc never deletes: a set, or a pin file (re-read each pass)
     """
-    return StoreServer((host, port), _handler(store, dict(max_body=max_body, timeout=timeout,
-                                                          writers=writers)))
+    srv = StoreServer((host, port), _handler(store, dict(max_body=max_body, timeout=timeout,
+                                                         writers=writers)))
+    srv._stop = threading.Event()
+    threading.Thread(target=_gc_loop, args=(store, srv._stop, retention, pins, gc_every, log),
+                     daemon=True).start()
+    return srv
 
 
 def start(store: DirStore, host: str = "127.0.0.1", port: int = 0, **opts):

@@ -2,6 +2,7 @@
 replication and concurrency (tests/test_node.py has the round trips)."""
 import http.client
 import json
+import os
 import socket
 import time
 
@@ -198,6 +199,120 @@ def test_cli_writers_and_store_key(tmp_path, job, server):
         main(["node", "publish", "--job", str(tmp_path / "job.json"), "--store", url])
     assert main(["node", "publish", "--job", str(tmp_path / "job.json"), "--store", url,
                  "--store-key", str(tmp_path / "k.json")]) == 0
+
+
+# ------------------------------------------------------------------------------- retention
+def _age(path, seconds):
+    t = time.time() - seconds
+    os.utime(path, (t, t))
+
+
+def test_gc_retention_pins_and_dry_run(tmp_path, job):
+    from tdcc_exact.node.store import NotFound
+    d = DirStore(tmp_path)
+    old, pinned = job, new_job("tiny", "Pinned?", every=EVERY)
+    fresh = new_job("tiny", "Fresh?", every=EVERY)
+    for j in (old, pinned, fresh):
+        d.put_job(j)
+    for j in (old, pinned):
+        _age(tmp_path / "jobs" / f"{j.digest.hex()}.json", 40 * 86400)
+    pins = {pinned.digest.hex()}
+    assert d.gc(None, pins).deleted == []                          # default: keep
+    r = d.gc(30 * 86400, pins, dry_run=True)
+    assert r.deleted == [("jobs", old.digest.hex())] and r.dry_run
+    assert r.pinned == [("jobs", pinned.digest.hex())]
+    assert d.get_job(old.digest) == old                            # dry run: still there
+    r = d.gc(30 * 86400, pins)
+    assert r.deleted == [("jobs", old.digest.hex())] and r.kept == 2
+    with pytest.raises(NotFound):
+        d.get_job(old.digest)
+    assert d.get_job(pinned.digest) == pinned and d.get_job(fresh.digest) == fresh
+
+
+def test_storing_again_restarts_the_clock(tmp_path, job):
+    d = DirStore(tmp_path)
+    d.put_job(job)
+    _age(tmp_path / "jobs" / f"{job.digest.hex()}.json", 40 * 86400)
+    d.put_job(job)
+    assert d.gc(30 * 86400).deleted == []
+
+
+def test_a_half_written_temp_file_is_ignored_and_cleaned(tmp_path, job):
+    from tdcc_exact.node.store import NotFound
+    d = DirStore(tmp_path)
+    k = job.digest.hex()
+    # a crash mid-write leaves the temp file the write was going to rename into place
+    tmp = tmp_path / "jobs" / f".{k}.abc123.tmp"
+    tmp.write_bytes(job_json(job)[:20])
+    with pytest.raises(NotFound):
+        d.get_job(k)
+    assert d.gc(temp_grace=3600).temps == []                       # maybe a live write
+    _age(tmp, 7200)
+    assert d.gc(dry_run=True).temps == [str(tmp)] and tmp.exists()
+    assert d.gc().temps == [str(tmp)] and not tmp.exists()
+    d.put_job(job)                                                 # and the key still works
+    assert d.get_job(k) == job
+    assert [p.name for p in (tmp_path / "jobs").iterdir()] == [f"{k}.json"]
+
+
+def test_a_failed_write_leaves_no_blob(tmp_path, job, monkeypatch):
+    from tdcc_exact.node.store import NotFound
+    d = DirStore(tmp_path)
+
+    def crash(*a):
+        raise OSError("disk full")
+    monkeypatch.setattr(os, "replace", crash)
+    with pytest.raises(OSError):
+        d.put_job(job)
+    monkeypatch.undo()
+    assert list((tmp_path / "jobs").iterdir()) == []
+    with pytest.raises(NotFound):
+        d.get_job(job.digest)
+
+
+def test_the_server_collects_on_a_schedule(tmp_path, job):
+    from tdcc_exact.node.store import NotFound
+    d = DirStore(tmp_path)
+    keep = new_job("tiny", "Keep?", every=EVERY)
+    for j in (job, keep):
+        d.put_job(j)
+        _age(tmp_path / "jobs" / f"{j.digest.hex()}.json", 3600)
+    (tmp_path / "pins").write_text(f"# keep this one\n{keep.digest.hex()}\n")
+    srv, url = start(d, retention=60, pins=str(tmp_path / "pins"), gc_every=0.05)
+    try:
+        c = HttpStore(url)
+        for _ in range(100):
+            try:
+                c.get_job(job.digest)
+            except NotFound:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("gc never ran")
+        assert c.get_job(keep.digest) == keep
+    finally:
+        srv.shutdown()
+
+
+def test_cli_gc(tmp_path, job, capsys):
+    from tdcc_exact.cli import main
+    d = DirStore(tmp_path / "s")
+    d.put_job(job)
+    _age(tmp_path / "s" / "jobs" / f"{job.digest.hex()}.json", 3 * 86400)
+    base = ["node", "gc", "--dir", str(tmp_path / "s")]
+    assert main(base) == 0 and "kept" in capsys.readouterr().out
+    assert main([*base, "--retention", "2d", "--dry-run"]) == 0
+    assert "would delete jobs/" in capsys.readouterr().out
+    (tmp_path / "pins").write_text(job.digest.hex() + "\n")
+    assert main([*base, "--retention", "2d", "--pins", str(tmp_path / "pins")]) == 0
+    assert d.get_job(job.digest) == job
+    assert main([*base, "--retention", "2d"]) == 0
+    assert not list((tmp_path / "s" / "jobs").iterdir())
+    from tdcc_exact.node.cli import store_opts
+    o = store_opts(_node_args("store", "--retention", "30d", "--gc-every", "15m"))
+    assert o["retention"] == 30 * 86400 and o["gc_every"] == 900
+    with pytest.raises(SystemExit):
+        _node_args("store", "--retention", "soon")
 
 
 def _node_args(*argv):
