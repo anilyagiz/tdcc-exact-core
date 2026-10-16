@@ -33,11 +33,10 @@ slashed with no manual step.
 
 - Deploy the current program to devnet as a new market (its accounts changed). **owner**: the
   upgrade authority; if the old deploy's authority is lost, a new program id.
-- Done: an arbiter service (`tdcc-exact node arbiter`) that rules on challenges within
-  `arbiter_window`. Left: once providers serve their windows, slash on a named fault (or a
-  window that does not chain) instead of on the bisection alone.
-- A reveal API on the provider node (`GET /jobs/{id}/window`) and a deadline after which a
-  provider that does not serve its window loses.
+- Done: an arbiter service (`tdcc-exact node arbiter`) that rules within `arbiter_window`,
+  and the reveal of disputed windows through the store (signed notes): a provider that does
+  not reveal its window, or reveals one that does not chain, is slashed; otherwise the
+  arbiter slashes at the fault it names, or dismisses.
 - A renter SDK: open a job, publish it to the store, wait for the answer.
 - Store replication: **owner** picks where traces live (a TDCC bucket, IPFS, Arweave) and how
   long (the challenge and ruling windows at least).

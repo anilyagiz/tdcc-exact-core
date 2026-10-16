@@ -91,8 +91,11 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
       (tdcc_exact/node/store.py, content-addressed, every read checked) and the provider node
       publishes its trace; the trace root is on-chain with the receipt. Open: replication
       (IPFS / Arweave / a TDCC bucket) and a deadline after which a missing trace loses.
-- [ ] Reveal API on the provider node: `GET /jobs/{id}/window?lo=&hi=` returns the step
+- [x] Reveal API on the provider node: `GET /jobs/{id}/window?lo=&hi=` returns the step
       records; a provider that does not answer within the deadline loses by default.
+      (Through the store: the challenger publishes its trace, the provider its disputed
+      window as a signed note; the arbiter node checks it with `verify_window`, names the
+      fault step, and slashes a provider that withholds it after a grace period.)
 - [ ] On-chain bisection game (the Merkle proofs it needs: `trace.merkle_proof` /
       `merkle_verify`): each round a transaction (`bisect_step(index, leaf)`),
       both sides alternate, with timeouts. log2(checkpoints) rounds.
@@ -134,8 +137,8 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
 - [x] An indexer: the program's events and accounts as a market snapshot
       (`tdcc-exact market status|events`).
 - [x] An arbiter service: watches Challenged, fetches the provider's trace from the store,
-      runs the dispute, signs slash or dismiss. (`tdcc-exact node arbiter`; it slashes on the
-      bisection alone until providers serve their windows, see the reveal API in item 6.)
+      runs the dispute, signs slash or dismiss. (`tdcc-exact node arbiter`, ruling on the
+      provider's revealed window.)
 - [ ] Renter API: "one API, like any GPU platform": HTTP endpoint that opens a job and
       returns the answer; payment per token in USDC from a wallet or over HTTP with x402.
 - [x] More cheat scenarios in tests: a smaller model substituted, fp4 instead of int8,
