@@ -26,7 +26,6 @@ The first open-source release of TDCC Exact.
   `registry`, `demo`.
 - LFM2.5-230M runs (prefill, a layer-true dishonest provider for the demo).
 - CI: the Python tests, the README's commands, and the program on a local validator.
-
 - Every run bound to its on-chain job and every job given a nonce, so a fingerprint cannot be
   replayed across jobs; the checkpoint interval is part of the job.
 - The trace covers the host's read of the logits and each slice's DRAM stores; a dispute checks
