@@ -19,15 +19,18 @@ the first instruction a dishonest run got wrong.
 | Sequencer + DMA | one instruction per cycle; every data movement is an instruction |
 
 It runs on a Kintex-7 FPGA PCIe card (Inspur YPCB-00338). **Honest status:** the Exact layer
-(trace log, fingerprint, dispute) runs on the bit-exact simulator today; the trace log in
-hardware and its speed on the card are not built or measured yet. The Solana program is
+(trace log, fingerprint, dispute) runs on the bit-exact simulator today. The trace log's hash
+chain exists in RTL and, in RTL simulation, matches the Python log bit for bit on the tests'
+runs ([docs/exact-rtl.md](docs/exact-rtl.md)), but it is not wired into the card's design yet, has
+not been through timing closure, and its speed on the card is not measured. The Solana program is
 **unaudited and on devnet only**, with a test USDC mint, and an arbiter key decides challenges
 until the on-chain bisection game lands ([SECURITY.md](SECURITY.md), [TODO.md](TODO.md)). [ROADMAP.md](ROADMAP.md) says what comes next, and [docs/architecture.md](docs/architecture.md) how the pieces fit.
 
 ## How TDCC Exact works
 
-1. **Rent.** A renter opens a job on Solana; the USDC waits in escrow.
-2. **Run.** A provider runs it on Exact Core and posts the answer's fingerprint.
+1. **Rent.** A renter offers a job to a provider on Solana; the USDC waits in escrow. The
+   provider accepts it, or lets the offer lapse and the renter takes the USDC back.
+2. **Run.** The provider runs it on Exact Core and posts the answer's fingerprint.
 3. **Check.** Any verifier re-runs it on a laptop. A mismatch opens a challenge.
 4. **Settle.** Honest providers get paid (80% host, 20% TDCC). A cheater loses its stake: the
    renter is refunded and the verifier takes a share.
@@ -46,15 +49,17 @@ TDCC Exact adds, in this repository:
 | Piece | Where |
 |:--|:--|
 | Trace log: a hash chain over every instruction, with checkpoints | [`tdcc_exact/trace.py`](tdcc_exact/trace.py) |
-| Oracle jobs, runs and receipts (fingerprint, trace root) | [`tdcc_exact/oracle.py`](tdcc_exact/oracle.py), [`tdcc_exact/backend.py`](tdcc_exact/backend.py) |
+| Oracle jobs (yes/no, or greedy generation), runs and receipts (fingerprint, trace root) | [`tdcc_exact/oracle.py`](tdcc_exact/oracle.py), [`tdcc_exact/backend.py`](tdcc_exact/backend.py) |
 | Commit-reveal receipts, against the copy attack | [`tdcc_exact/commit.py`](tdcc_exact/commit.py) |
 | Bisection dispute down to the first wrong instruction | [`tdcc_exact/dispute.py`](tdcc_exact/dispute.py) |
 | Settlement arithmetic, shared with the program | [`tdcc_exact/settle.py`](tdcc_exact/settle.py), [`tests/data/exact_settle_vectors.json`](tests/data/exact_settle_vectors.json) |
 | Model registry: a job pins the DRAM image its model runs as | [`tdcc_exact/registry.py`](tdcc_exact/registry.py), [`tdcc_exact/models.json`](tdcc_exact/models.json) |
-| The Solana program: escrow, stakes, receipts, challenge, slash, settle | [`programs/tdcc_exact`](programs/tdcc_exact) |
+| The Solana program: escrow, stakes, offers a provider accepts, receipts, challenge, slash, settle | [`programs/tdcc_exact`](programs/tdcc_exact) |
 | Chain client and the on-chain demo | [`tdcc_exact/chain.py`](tdcc_exact/chain.py), [`tdcc_exact/chain_demo.py`](tdcc_exact/chain_demo.py) |
 | The `tdcc-exact` command | [`tdcc_exact/cli.py`](tdcc_exact/cli.py) |
-| Tests | [`tests/test_exact.py`](tests/test_exact.py), [`tests/test_chain.py`](tests/test_chain.py) |
+| Market services: job and trace store, provider, verifier, arbiter and settler nodes, an indexer | [`tdcc_exact/node`](tdcc_exact/node), [`tdcc_exact/indexer.py`](tdcc_exact/indexer.py), [docs/operations.md](docs/operations.md#running-the-services) |
+| The trace log's hash chain in RTL, simulated against the Python log (not yet in the core) | [`rtl/exact`](rtl/exact), [docs/exact-rtl.md](docs/exact-rtl.md), `make exact-rtl` |
+| Tests | [`tests/test_exact.py`](tests/test_exact.py), [`tests/test_chain.py`](tests/test_chain.py), [`tests/test_node.py`](tests/test_node.py), [`tests/test_exact_rtl.py`](tests/test_exact_rtl.py) |
 
 Inside `opentpu/` the only change is an observer hook in `isasim.Machine.run`, which the trace
 log uses.
@@ -129,6 +134,7 @@ tdcc-exact demo --localnet
 ```
 1. renter opens the oracle job on tiny with A and with B, 2.00 USDC each into escrow
    open_job: https://explorer.solana.com/tx/3FefAq...
+   A accepts: ...   B accepts: ...
 2. A runs it honestly; B skips layer 1 to save time
    A: NO   fingerprint 165e6a999aa2a250..  commit https://explorer.solana.com/tx/2DBA3c...
    B: NO   fingerprint 87644c96c0d26767..  commit https://explorer.solana.com/tx/3rGpt6...
@@ -151,7 +157,12 @@ On devnet the admin key needs about 1 SOL first (`tdcc-exact demo --devnet` prin
 when it has none; https://faucet.solana.com).
 
 [docs/exact.md](docs/exact.md) describes the trace log, the fingerprint, the dispute, the
-security of receipts and the Solana program.
+security of receipts and the Solana program; [docs/architecture.md](docs/architecture.md) how
+the pieces fit, [docs/threat-model.md](docs/threat-model.md) what can go wrong, and
+[docs/operations.md](docs/operations.md) how to run a market and its services. Two design
+proposals, not built, are for the owner to decide on: the dispute on-chain without an arbiter
+([docs/design/onchain-dispute.md](docs/design/onchain-dispute.md)) and paying verifiers
+([docs/design/verifier-incentives.md](docs/design/verifier-incentives.md)).
 
 ---
 

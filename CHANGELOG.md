@@ -35,8 +35,25 @@ The first open-source release of TDCC Exact.
   the arbiter its own rotatable key and a ruling deadline, penalizes a withheld reveal, refuses
   a reveal from a provider below the minimum stake, lets a renter give a fan-out one commit
   deadline, and closes finished jobs (`close_job`).
-- Services: a content-addressed job and trace store, a provider node and a verifier node
-  (`tdcc-exact node`), and an indexer (`tdcc-exact market status|events`).
+- Services: a content-addressed job and trace store, a provider node, a verifier node and an
+  arbiter node (`tdcc-exact node`), and an indexer (`tdcc-exact market status|events`).
+- Provider consent: `open_job` makes a job `Offered` (the escrow in the vault, none of the
+  provider's stake locked); the provider takes it on with `accept_job` before the job's
+  `accept_deadline`, after which the renter alone can `cancel_job` it (`NotTheRenter`
+  otherwise) and get the escrow back with no penalty; a cancelled job ends `Expired`. Events
+  `JobAccepted` and `JobCancelled`. The provider node accepts only the offers it has checked.
+- A settler node (`tdcc-exact node settler`): settles, expires, closes finished jobs
+  (`--no-close` to keep them), and cancels the lapsed offers of its own key (`--name` a
+  renter's).
+- Generate jobs (`job new --kind generate --max-tokens N`): greedy decoding in the trace, the
+  answer in the fingerprint as `b"GEN"` and u32 token ids, verified and disputed off-chain;
+  the program still takes yes/no answers.
+- `tools/checkpoint_bench.py` measures the checkpoint interval (docs/exact.md section 7; the
+  default stays 4096, and the interval is in the job's digest).
+- The trace log's hash chain in RTL (`rtl/exact/`, docs/exact-rtl.md, `make exact-rtl`),
+  tested against `trace.py` in Verilator or Icarus simulation (skipped when neither is
+  installed). It is standalone: not yet in the sequencer, not run through Vivado, and the
+  checkpoints' state hash comes from the host.
 - A public library API (`tdcc_exact.__all__`, `__version__`, `py.typed`), the commit's salt in
   a private file, `verify --strict`, a user model registry.
 - Docs: architecture, threat model, glossary, operations; an oracle evaluation tool.
@@ -47,3 +64,5 @@ The first open-source release of TDCC Exact.
 
 - The program is unaudited and runs on devnet only; see [SECURITY.md](SECURITY.md) for its
   known limits.
+- The verifier node picks the jobs it re-runs by a hash of the job and its secret key, not
+  its public key, so a provider cannot compute in advance which of its jobs go unchecked.

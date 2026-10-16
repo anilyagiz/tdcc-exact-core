@@ -1,11 +1,12 @@
 """The verifier node: re-run revealed jobs and challenge the receipts that do not match.
 
 Each pass (`run_once`) lists the market's Revealed jobs and, for a sample of them (`rate`, by
-a hash of the job and the verifier's key, so a restart samples the same ones and verifiers
-sample different ones), fetches the Job from the store under the on-chain digest, re-runs it
-and compares fingerprints: a match is accepted, a mismatch challenged while the challenge
-window is open. Each verdict goes into the state file, with whether the provider's trace was
-in the store (the arbiter's bisection needs it).
+a hash of the job and the verifier's secret key, so a restart samples the same ones, verifiers
+sample different ones, and no provider can compute which of its jobs are left unchecked),
+fetches the Job from the store under the on-chain digest, re-runs it and compares
+fingerprints: a match is accepted, a mismatch challenged while the challenge window is open.
+Each verdict goes into the state file, with whether the provider's trace was in the store
+(the arbiter's bisection needs it).
 
 When it challenges, the node publishes its re-run's trace to the store and a note it signs
 under store.signed_key("challenge", job, verifier) naming that trace's root: the challenged

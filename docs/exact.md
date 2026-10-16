@@ -18,8 +18,8 @@ Every instruction the simulator steps extends a hash chain (SHA-256, the hash So
 
     chain = H(chain || slice || pc || the instruction's 8 words || R0..R15 after it)
 
-Every `job.every` steps (4096 by default; the interval is part of the job, so provider and
-verifier checkpoint alike), and when each device run ends, the log takes a checkpoint: a hash
+Every `job.every` steps (4096 by default; the interval is part of the job and of its digest,
+so provider and verifier checkpoint alike), and when each device run ends, the log takes a checkpoint: a hash
 of each slice's working state (TMEM, the ACT RAM and its scales, the registers, the pc, and a
 running hash of what its stores wrote to DRAM), folded into the chain. A checkpoint's leaf is `H(step || chain || state)`, and the trace root is the
 Merkle root of the leaves with their count hashed on top (`H(2 || count || root)`), so a list
@@ -45,6 +45,17 @@ answers with whichever of the two tokens has the larger logit, and posts:
 
 Before anything runs, `Job.check` refuses a job no run could answer right: the same token
 for Yes and No, a prompt longer than the KV cache, token ids outside the vocabulary.
+
+A job of kind `generate` (`tdcc-exact job new --kind generate --max-tokens N`) asks for text
+instead: after the prompt, up to `max_tokens` tokens are decoded greedily, each one a device
+run in the same trace, stopping at a token in `stop_ids`. Greedy is the argmax of the logits
+the trace read back, ties to the lowest token id, so every honest run picks the same tokens.
+The answer in the fingerprint is `b"GEN"` followed by each token id as a little-endian u32,
+and the logits hash covers every step's logits. `kind`, `max_tokens` and `stop_ids` are in a
+generate job's digest; a yes/no job's digest leaves them out, so it is the digest it had
+before they existed. Sampling is not offered (its host RNG would have to be seeded from the
+job and the sampler's arithmetic traced). Generate jobs are off-chain for now: the program's
+`reveal_receipt` takes a YES / NO answer.
 
 Two honest runs give the same fingerprint, on any machine. In the demo the cheating provider
 often gives the **same answer** as the honest one; only the fingerprint shows the difference.
@@ -151,7 +162,7 @@ runs the demo against it.
 | `Config` | `config, admin` | the mint (USDC), the treasury, the vault, 80/20 and 50/50 in bps, the windows (slots), the minimum stake, the unstake cooldown, the challenge bond, the arbiter key and its ruling window, the penalty for a withheld reveal |
 | vault | `vault, config` | one token account for every escrow, stake and bond; its authority is the config |
 | `Provider` | `provider, config, owner` | the stake, open jobs, a pending unstake |
-| `Job` | `job, config, renter, job id` | the job digest, the expected model hash, the price, the state, the deadlines, the commitment, the revealed fingerprint, answer and trace root, the challenger, its bond and the ruling deadline |
+| `Job` | `job, config, renter, job id` | the job digest, the expected model hash, the price, the state, the deadlines (accept, commit, reveal, challenge, ruling), the commitment, the revealed fingerprint, answer and trace root, the challenger and its bond |
 
 A market is a config, seeded by its admin's key, so anyone can run one (the demo makes its own
 test USDC mint). The **arbiter** signs `slash` (or `dismiss`) after the off-chain bisection
@@ -163,22 +174,43 @@ and the receipt stands. Replacing the arbiter by an on-chain bisection game is T
 
 `initialize` refuses a market with a zero window, stake or bond, and one whose unstake
 cooldown does not outlast a job (commit, reveal, challenge and ruling windows together), so a
-provider cannot leave before a challenge against it is ruled. The reveal window reuses the
-commit window's length: `reveal_deadline = commit_deadline + commit_window`.
+provider cannot leave before a challenge against it is ruled (a job's life is counted from
+its acceptance). The reveal window reuses the commit window's length:
+`reveal_deadline = commit_deadline + commit_window`.
+
+**Consent.** A renter cannot put a job on a provider. `open_job` makes the job `Offered`: the
+escrow moves into the vault, but the provider's open-job count does not rise, so none of its
+stake is locked. Only the job's provider can `accept_job`, until the job's
+`accept_deadline` (`commit_window` slots after the opening, or the renter's absolute commit
+deadline); the job turns `Open`, counts in the provider's open jobs, and its commit deadline
+is fixed: `commit_window` after the acceptance, or the renter's absolute one, which a fan-out
+shares so that no provider can commit after another's reveal. An offer the provider does not
+accept lapses: after the accept deadline the renter (and only the renter: `NotTheRenter`)
+sends `cancel_job` and gets the escrow back, with no penalty on anyone; the job ends
+`Expired`, with a `JobCancelled` event, and closes like any finished job. The provider node
+accepts only the jobs it has fetched and checked (the digest, the registry's model hash), so
+it never takes on a job it will not run.
+
+The states: `Offered` -> `Open` (accepted) -> `Committed` -> `Revealed` -> `Settled`, with
+`Challenged` -> `Slashed`, or back to `Revealed` on a dismissal; `Offered`, `Open` and
+`Committed` can end `Expired` (cancelled, or no reveal). `Settled`, `Slashed` and `Expired`
+are final, and `close_job` removes the account.
 
 | Instruction | Who | When |
 |:--|:--|:--|
 | `set_arbiter` | the admin | any time |
 | `register_provider`, `stake`, `request_unstake`, `unstake` | provider | unstake after the cooldown and with no open jobs |
-| `open_job` | renter | the provider is staked and not leaving; the price (above 0) moves into the vault; an optional absolute commit deadline lets one job fanned out to several providers share it |
+| `open_job` | renter | the provider is staked and not leaving; the price (above 0) moves into the vault; the job is `Offered` until `accept_deadline`; an optional absolute commit deadline lets one job fanned out to several providers share it |
+| `accept_job` | the job's provider, staked and not leaving | `Offered`, until `accept_deadline`; the job turns `Open`, its commit and reveal deadlines are set, and it counts in the provider's open jobs |
+| `cancel_job` | the job's renter | `Offered`, after `accept_deadline`: the escrow goes back to the renter, no penalty; the job ends `Expired` |
 | `commit_receipt` | the job's provider | until `commit_deadline` |
 | `reveal_receipt` | the job's provider, with at least the minimum stake | after `commit_deadline`, until `reveal_deadline`; opens the commitment, and checks on-chain that the fingerprint is `H(job digest, model hash, answer, logits hash, trace root)` and the trace root is `H(2, count, tree root)`, so the answer, the logits and the checkpoint count are bound |
 | `challenge` | anyone but the provider and the arbiter, posting `challenge_bond` | until `challenge_deadline`, with another fingerprint; a dismissed challenge does not close the window for other verifiers |
 | `settle` | anyone | revealed, unchallenged, after `challenge_deadline` |
 | `slash` | the arbiter | challenged, before the ruling deadline; names a checkpoint index of the posted trace (at most its count); the bond goes back to the verifier with its share |
 | `dismiss` | the arbiter, or anyone after the ruling deadline | challenged; the bond goes to the provider |
-| `expire` | anyone | no reveal by `reveal_deadline`: the escrow goes back to the renter, plus `non_reveal_penalty` from the stake when the provider committed and withheld its reveal |
-| `close_job` | anyone | a finished job (settled, slashed, expired): its rent goes back to the renter |
+| `expire` | anyone | an `Open` or `Committed` job with no reveal by `reveal_deadline`: the escrow goes back to the renter, plus `non_reveal_penalty` from the stake when the provider committed and withheld its reveal |
+| `close_job` | anyone | a finished job (settled, slashed, expired or cancelled): its rent goes back to the renter |
 
 Every payout checks that the token account belongs to the party it pays and holds the market's
 mint.
@@ -189,12 +221,11 @@ each checking the program's error code; the unstake, expiry and closing tests re
 back from the transaction logs. CI runs both.
 
 Every state change emits an event: `Initialized`, `ArbiterChanged`, `ProviderRegistered`,
-`Staked`, `UnstakeRequested`, `Unstaked`, `JobOpened`, `ReceiptCommitted`, `ReceiptRevealed`
+`Staked`, `UnstakeRequested`, `Unstaked`, `JobOpened`, `JobAccepted`, `JobCancelled`,
+`ReceiptCommitted`, `ReceiptRevealed`
 (with the answer), `Challenged`, `Dismissed`, `Slashed`, `Settled`, `Expired`, `JobClosed`.
 
-Not yet: verifier selection and the on-chain bisection (TODO.md items 6, 7). A renter can open
-a job for any staked provider without its consent; the provider's stake is held until the job
-expires.
+Not yet: verifier selection and the on-chain bisection (TODO.md items 6, 7).
 
 ## 7. Overhead of the log
 
@@ -324,7 +355,8 @@ model, or a calibrated threshold (the Yes - No margin against a content-free pro
 | Piece | State |
 |:--|:--|
 | Trace log, fingerprint, dispute | on the bit-exact ISA simulator, tested (`tests/test_exact.py`; LFM2.5-230M when `models/LFM2.5-230M` exists) |
-| Trace log in RTL / on the card | not built: the card has a performance trace (`otpu_trace.sv`), not this hash chain |
+| Trace log in RTL / on the card | the hash chain engine is in RTL (`rtl/exact/`, [exact-rtl.md](exact-rtl.md)) and simulated bit for bit against `trace.py`; not yet wired into the sequencer, not run through Vivado, and the checkpoints' state hash still comes from the host. The card runs no trace log yet |
+| Generate jobs | greedy decoding of up to `max_tokens` tokens, verified and disputed off-chain (`tests/test_generate.py`); the program takes yes/no answers only |
 | Overhead of the log | measured on LFM2.5-230M (section 7): +14% on the simulator |
 | Receipts: commit-reveal, SHA-256, model registry | done, tested |
 | Solana program | `programs/tdcc_exact`, tested on a local validator; challenges decided by an arbiter |
