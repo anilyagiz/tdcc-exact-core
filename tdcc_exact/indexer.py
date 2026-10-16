@@ -12,7 +12,7 @@ does not know decodes as {"name": "?", "raw": hex} rather than failing.
 Accounts. getProgramAccounts with a discriminator filter, decoded by chain.JobAccount /
 chain.ProviderAccount (and CONFIG_FIELDS here), summed into a snapshot: jobs by state, the
 escrow still locked, the stakes, the open challenges, and the jobs past a deadline that
-anyone may now settle (or the renter expire).
+anyone may now settle or expire (or the renter cancel: an offer its provider let lapse).
 
 Pubkeys come out as base58 strings and byte arrays as hex, so everything is JSON as is. Only
 the RPC and account parts need solders (pip install -e '.[chain]'); the event decoder does
@@ -106,6 +106,9 @@ EVENTS: dict[str, list[tuple[str, str]]] = {
     "Staked": [("provider", "pubkey"), ("amount", "u64"), ("stake", "u64")],
     "JobOpened": [("job", "pubkey"), ("renter", "pubkey"), ("provider", "pubkey"),
                   ("price", "u64"), ("job_digest", "bytes32")],
+    "JobAccepted": [("job", "pubkey"), ("provider", "pubkey"), ("commit_deadline", "u64"),
+                    ("reveal_deadline", "u64")],
+    "JobCancelled": [("job", "pubkey"), ("renter", "pubkey"), ("refunded", "u64")],
     "ReceiptCommitted": [("job", "pubkey"), ("commitment", "bytes32")],
     "ReceiptRevealed": [("job", "pubkey"), ("fingerprint", "bytes32"),
                         ("trace_root", "bytes32"), ("checkpoints", "u32"), ("answer", "u8"),
@@ -215,7 +218,8 @@ CONFIG_FIELDS = [("admin", "pubkey"), ("mint", "pubkey"), ("treasury", "pubkey")
                  ("arbiter_window", "u64"), ("non_reveal_penalty", "u64"), ("bump", "u8"),
                  ("vault_bump", "u8")]
 
-LIVE = ("Open", "Committed", "Revealed", "Challenged")      # the escrow is still in the vault
+# the escrow is still in the vault
+LIVE = ("Offered", "Open", "Committed", "Revealed", "Challenged")
 
 
 def _disc(name: str) -> bytes:
@@ -290,6 +294,10 @@ def build_snapshot(slot: int, configs: dict[str, dict], providers: dict[str, dic
             actions.append({"job": addr, "action": "expire", "state": st,
                             "deadline": j["reveal_deadline"],
                             "late": slot - j["reveal_deadline"]})
+        elif st == "Offered" and slot > j["accept_deadline"]:    # the renter's to cancel
+            actions.append({"job": addr, "action": "cancel", "state": st,
+                            "deadline": j["accept_deadline"],
+                            "late": slot - j["accept_deadline"]})
     stakes = sorted(({"provider": p["owner"], "account": a, "stake": p["stake"],
                       "open_jobs": p["open_jobs"], "unlock_slot": p["unlock_slot"]}
                      for a, p in providers.items()), key=lambda p: -p["stake"])

@@ -88,11 +88,14 @@ def _events(w, sig) -> list[str]:
     return [disc.get(d[:8], "?") for d in data]
 
 
-def _open(w, provider):
+def _open(w, provider, accept=True, commit_deadline=0):
+    """A job opened with `provider` and, unless accept=False, accepted by it (Open)."""
     jid = w["next"][0]
     w["next"][0] += 1
-    job, _ = w["m"].open_job(w["renter"], provider.pubkey(), jid, bytes([jid]) * 32, MODEL,
-                             PRICE)
+    job, _ = w["m"].open_job(w["renter"], provider.pubkey(), jid, bytes([jid % 256]) * 32,
+                             MODEL, PRICE, commit_deadline)
+    if accept:
+        w["m"].accept_job(provider, job)
     return job
 
 
@@ -595,6 +598,7 @@ def test_a_real_run_reveals(world):
     onchain, _ = m.open_job(w["renter"], w["a"].pubkey(), jid, job.digest,
                             bytes.fromhex(r.model_hash), PRICE)
     assert onchain == key
+    m.accept_job(w["a"], onchain)
     salt = os.urandom(32)
     m.commit_receipt(w["a"], onchain, commitment(bytes.fromhex(r.fingerprint),
                                                  bytes(w["a"].pubkey()), salt))
@@ -606,23 +610,105 @@ def test_a_real_run_reveals(world):
 
 def test_a_fan_out_shares_one_commit_deadline(world):
     """The renter opens one job with A and with B in two transactions and gives both the same
-    absolute commit deadline; one later than commit_window from now, or already past, is
-    refused."""
+    absolute commit deadline, which their acceptances keep (a late acceptor gets no later
+    commit deadline to copy the other's reveal by); one later than commit_window from now, or
+    already past, is refused."""
     w, m, rpc = world, world["m"], world["rpc"]
     other = _provider(w)
     deadline = rpc.slot() + WORLD.commit_window
-    jobs = []
-    for p in (w["a"], other):
-        jid = w["next"][0]
-        w["next"][0] += 1
-        jobs.append(m.open_job(w["renter"], p.pubkey(), jid, bytes([jid % 256]) * 32, MODEL,
-                               PRICE, deadline)[0])
+    jobs = [_open(w, p, accept=False, commit_deadline=deadline) for p in (w["a"], other)]
+    assert [m.job(j).accept_deadline for j in jobs] == [deadline, deadline]
+    m.accept_job(w["a"], jobs[0])
+    rpc.wait_slot(rpc.slot() + 1)
+    m.accept_job(other, jobs[1])
     assert [m.job(j).commit_deadline for j in jobs] == [deadline, deadline]
-    assert m.job(jobs[0]).reveal_deadline == deadline + WORLD.commit_window
+    assert [m.job(j).reveal_deadline for j in jobs] == [deadline + WORLD.commit_window] * 2
     for bad in (rpc.slot() + WORLD.commit_window + 5, 1):
         with pytest.raises(ChainError, match="BadParams"):
             m.open_job(w["renter"], w["a"].pubkey(), 99_000 + bad % 1000, bytes(32), MODEL,
                        PRICE, bad)
+
+
+# ------------------------------------------------------------------ the provider's consent
+def test_an_offer_binds_the_provider_only_once_accepted(world):
+    """open_job makes an Offered job: the escrow is in, but the provider's open jobs do not
+    count it, it cannot be committed or expired, and only its provider accepts it; the
+    acceptance counts it and starts the commit deadline (commit_window from the acceptance)."""
+    w, m, rpc = world, world["m"], world["rpc"]
+    a = w["a"]
+    n0, r0 = m.provider(a.pubkey()).open_jobs, m.balance(w["renter"].pubkey())
+    job = _open(w, a, accept=False)
+    j = m.job(job)
+    assert (j.state, j.commit_deadline, j.reveal_deadline) == ("Offered", 0, 0)
+    assert j.accept_deadline == j.opened_slot + WORLD.commit_window
+    assert r0 - m.balance(w["renter"].pubkey()) == PRICE                # escrowed
+    assert m.provider(a.pubkey()).open_jobs == n0                       # nothing locked
+    with pytest.raises(ChainError, match="WrongState"):
+        m.commit_receipt(a, job, b"\x01" * 32)
+    with pytest.raises(ChainError, match="WrongState"):
+        m.expire(w["renter"], job)
+    with pytest.raises(ChainError, match="NotYourJob"):                 # not the job's provider
+        m.accept_job(w["b"], job)
+    rpc.wait_slot(j.opened_slot + 2)
+    sig = m.accept_job(a, job)
+    assert _events(w, sig) == ["JobAccepted"]
+    j = m.job(job)
+    assert j.state == "Open" and m.provider(a.pubkey()).open_jobs == n0 + 1
+    assert j.commit_deadline > j.accept_deadline                        # counted from acceptance
+    assert j.reveal_deadline == j.commit_deadline + WORLD.commit_window
+    with pytest.raises(ChainError, match="WrongState"):                 # once
+        m.accept_job(a, job)
+    with pytest.raises(ChainError, match="WrongState"):                 # accepted: no cancel
+        m.cancel_job(w["renter"], job)
+    rpc.wait_slot(j.reveal_deadline)
+    m.expire(w["renter"], job)
+    assert m.provider(a.pubkey()).open_jobs == n0
+
+
+def test_an_offer_not_accepted_in_time_is_cancelled_by_the_renter(world):
+    w, m, rpc = world, world["m"], world["rpc"]
+    job = _open(w, w["a"], accept=False)
+    with pytest.raises(ChainError, match="WindowOpen"):                 # the provider's turn
+        m.cancel_job(w["renter"], job)
+    rpc.wait_slot(m.job(job).accept_deadline)
+    with pytest.raises(ChainError, match="WindowClosed"):               # too late to accept
+        m.accept_job(w["a"], job)
+    built = _built(m, "cancel_job", w["verifier"], job)                 # someone else
+    with pytest.raises(ChainError, match="NotTheRenter"):
+        w["rpc"].send(built[0], *built[1])
+    _redirect(w, _built(m, "cancel_job", w["renter"], job), ata(w["renter"].pubkey(), m.mint),
+              _thief(w), "ConstraintTokenOwner")
+    r0, s0 = m.balance(w["renter"].pubkey()), m.provider(w["a"].pubkey()).stake
+    sig = m.cancel_job(w["renter"], job)
+    assert _events(w, sig) == ["JobCancelled"]
+    assert m.balance(w["renter"].pubkey()) - r0 == PRICE                 # no penalty either way
+    assert m.provider(w["a"].pubkey()).stake == s0
+    assert m.job(job).state == "Expired"
+    with pytest.raises(ChainError, match="WrongState"):
+        m.cancel_job(w["renter"], job)
+    m.close_job(job, w["verifier"])
+    assert rpc.account(job) is None
+
+
+def test_offers_do_not_lock_the_stake(world):
+    """A provider with only Offered jobs unstakes after the cooldown (an unwanted offer ties
+    up nothing), and once leaving or gone it accepts nothing; the renter cancels."""
+    w, m, rpc = world, world["m"], world["rpc"]
+    d = _provider(w)
+    j1, j2 = _open(w, d, accept=False), _open(w, d, accept=False)
+    m.request_unstake(d)
+    with pytest.raises(ChainError, match="ProviderNotStaked"):          # leaving: no acceptance
+        m.accept_job(d, j1)
+    rpc.wait_slot(m.provider(d.pubkey()).unlock_slot)
+    before = m.balance(d.pubkey())
+    m.unstake(d)
+    assert m.balance(d.pubkey()) - before == STAKE
+    with pytest.raises(ChainError, match="ProviderNotStaked"):
+        m.accept_job(d, j2)
+    r0 = m.balance(w["renter"].pubkey())
+    for j in (j1, j2):
+        m.cancel_job(w["renter"], j)
+    assert m.balance(w["renter"].pubkey()) - r0 == 2 * PRICE
 
 
 # ------------------------------------------------------------------ payouts go to their party

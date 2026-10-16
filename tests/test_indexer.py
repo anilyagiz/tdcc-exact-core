@@ -162,13 +162,14 @@ JOB = [("config", "pubkey"), ("renter", "pubkey"), ("provider", "pubkey"),
        ("checkpoints", "u32"), ("verifier", "pubkey"),
        ("verifier_fingerprint", "bytes32"), ("bond", "u64"),
        ("challenge_slot", "u64"), ("ruling_deadline", "u64"), ("answer", "u8"),
-       ("bump", "u8")]
+       ("bump", "u8"), ("accept_deadline", "u64")]
 
 
 def _job(state: int, price: int, opened: int, reveal: int, challenge: int, seed: int) -> bytes:
     v = _sample(JOB, seed)
     v.update(state=state, price=price, opened_slot=opened, commit_deadline=opened + 4,
-             reveal_deadline=reveal, challenge_deadline=challenge, checkpoints=3)
+             reveal_deadline=reveal, challenge_deadline=challenge, checkpoints=3,
+             accept_deadline=opened + 4)
     return _acct("Job", JOB, v)
 
 
@@ -177,7 +178,8 @@ def test_job_and_provider_accounts_decode():
     assert _structs("#[account]\n#[derive(InitSpace)]")["Job"] == JOB
     d = indexer.decode_job(_job(2, 7, 100, 108, 0, 1))
     assert (d["state"], d["price"], d["opened_slot"], d["reveal_deadline"],
-            d["checkpoints"]) == ("Revealed", 7, 100, 108, 3)
+            d["checkpoints"], d["accept_deadline"]) == ("Revealed", 7, 100, 108, 3, 104)
+    assert indexer.decode_job(_job(7, 7, 100, 0, 0, 1))["state"] == "Offered"
     assert d["renter"] == b58(_sample(JOB, 1)["renter"])
     assert d["model_hash"] == _sample(JOB, 1)["model_hash"].hex()
     prov = [("owner", "pubkey"), ("stake", "u64"), ("open_jobs", "u32"),
@@ -203,22 +205,25 @@ def test_snapshot_sums_escrow_and_finds_late_jobs():
         "settled": (4, 70, 70, 80, 90),
         "slashed": (5, 80, 80, 90, 95),
         "expired": (6, 90, 90, 95, 0),
+        "offered-late": (7, 5, 95, 0, 0),         # not accepted by 99: the renter cancels
+        "offered-ok": (7, 6, 998, 0, 0),
     }
     jobs = {a: indexer.decode_job(_job(*r, seed=i)) for i, (a, r) in enumerate(raw.items())}
     provs = {"pa": {"owner": "A", "stake": 5, "open_jobs": 1, "unlock_slot": 0},
              "pb": {"owner": "B", "stake": 9, "open_jobs": 0, "unlock_slot": 1200}}
     s = build_snapshot(slot, {}, provs, jobs)
-    assert s["jobs"] == 9
+    assert s["jobs"] == 11
     assert s["jobs_by_state"] == {"Open": 2, "Committed": 1, "Revealed": 2, "Challenged": 1,
-                                  "Settled": 1, "Slashed": 1, "Expired": 1}
-    assert s["escrow"] == 10 + 20 + 30 + 40 + 50 + 60
+                                  "Settled": 1, "Slashed": 1, "Expired": 1, "Offered": 2}
+    assert s["escrow"] == 10 + 20 + 30 + 40 + 50 + 60 + 5 + 6
     assert s["total_stake"] == 14 and s["providers"][0]["provider"] == "B"
     assert [c["job"] for c in s["open_challenges"]] == ["challenged"]
     assert [(x["job"], x["action"], x["late"]) for x in s["actionable"]] == [
         ("open-late", "expire", 980), ("committed-late", "expire", 960),
-        ("revealed-late", "settle", 100)]
+        ("revealed-late", "settle", 100), ("offered-late", "cancel", 901)]
     text = indexer.format_snapshot(s)
     assert "SETTLE revealed-late" in text and "EXPIRE open-late" in text
+    assert "CANCEL offered-late" in text
     assert "CHALLENGED challenged" in text
 
 
@@ -282,30 +287,38 @@ def test_validator_flow_is_indexed():
         rpc.wait_slot(m.job(job).commit_deadline)
         m.reveal_receipt(prov, job, fp, salt, model, "YES", seed, b"\x0a" * 32, 3)
 
-    j1, _ = m.open_job(renter, prov.pubkey(), 1, b"\x01" * 32, model, 2_000_000)
+    def opened(jid, price):
+        job, _ = m.open_job(renter, prov.pubkey(), jid, bytes([jid]) * 32, model, price)
+        m.accept_job(prov, job)
+        return job
+
+    j1 = opened(1, 2_000_000)
     post(j1, b"\x11" * 32)
     m.challenge(verifier, j1, b"\x12" * 32)
     m.dismiss(j1)
     rpc.wait_slot(m.job(j1).challenge_deadline)
     m.settle(admin, j1)
-    j2, _ = m.open_job(renter, prov.pubkey(), 2, b"\x02" * 32, model, 3_000_000)
+    j2 = opened(2, 3_000_000)
     post(j2, b"\x21" * 32)                       # revealed, left to settle
-    j3, _ = m.open_job(renter, prov.pubkey(), 3, b"\x03" * 32, model, 1_000_000)
-    rpc.wait_slot(max(m.job(j2).challenge_deadline, m.job(j3).reveal_deadline))
+    j3 = opened(3, 1_000_000)                    # accepted, never committed
+    j4, _ = m.open_job(renter, prov.pubkey(), 4, b"\x04" * 32, model, 500_000)   # not accepted
+    rpc.wait_slot(max(m.job(j2).challenge_deadline, m.job(j3).reveal_deadline,
+                      m.job(j4).accept_deadline))
 
     s = indexer.snapshot(rpc, str(admin.pubkey()))
     assert list(s["configs"]) == [str(m.config)]
-    assert s["jobs_by_state"] == {"Settled": 1, "Revealed": 1, "Open": 1}
-    assert s["escrow"] == 4_000_000
+    assert s["jobs_by_state"] == {"Settled": 1, "Revealed": 1, "Open": 1, "Offered": 1}
+    assert s["escrow"] == 4_500_000
     assert [(p["provider"], p["stake"], p["open_jobs"]) for p in s["providers"]] == [
         (str(prov.pubkey()), 20_000_000, 2)]
-    assert {(x["job"], x["action"]) for x in s["actionable"]} == {(str(j2), "settle"),
-                                                                  (str(j3), "expire")}
+    assert {(x["job"], x["action"]) for x in s["actionable"]} == {
+        (str(j2), "settle"), (str(j3), "expire"), (str(j4), "cancel")}
     assert s["open_challenges"] == []
     everything = indexer.snapshot(rpc)
-    assert everything["jobs"] >= 3 and str(m.config) in everything["configs"]
+    assert everything["jobs"] >= 4 and str(m.config) in everything["configs"]
 
     m.expire(renter, j3)
+    m.cancel_job(renter, j4)
     m.mint_to(leaver.pubkey(), 15_000_000)                 # a provider that leaves
     m.register_provider(leaver)
     m.stake(leaver, 15_000_000)
@@ -318,18 +331,23 @@ def test_validator_flow_is_indexed():
     assert all(e["name"] != "?" for e in evs)
     init = [e for e in evs if e["name"] == "Initialized" and e["config"] == str(m.config)]
     assert init and init[0]["admin"] == str(admin.pubkey()) and init[0]["mint"] == str(m.mint)
-    mine = [e for e in evs if e.get("job") in (str(j1), str(j2), str(j3))
+    mine = [e for e in evs if e.get("job") in (str(j1), str(j2), str(j3), str(j4))
             or e.get("provider") == str(prov.pubkey())]
     assert [e["name"] for e in mine] == [
-        "ProviderRegistered", "Staked", "JobOpened", "ReceiptCommitted", "ReceiptRevealed",
-        "Challenged", "Dismissed", "Settled", "JobOpened", "ReceiptCommitted",
-        "ReceiptRevealed", "JobOpened", "Expired"]
+        "ProviderRegistered", "Staked", "JobOpened", "JobAccepted", "ReceiptCommitted",
+        "ReceiptRevealed", "Challenged", "Dismissed", "Settled", "JobOpened", "JobAccepted",
+        "ReceiptCommitted", "ReceiptRevealed", "JobOpened", "JobAccepted", "JobOpened",
+        "Expired", "JobCancelled"]
     assert mine[1]["stake"] == 20_000_000 and mine[2]["price"] == 2_000_000
-    assert mine[4]["logits_hash"] == "11" * 32 and mine[4]["checkpoints"] == 3
-    assert mine[4]["answer"] == 1 and mine[4]["fingerprint"] == m.job(j1).fingerprint.hex()
-    assert mine[5]["verifier"] == str(verifier.pubkey())
-    assert (mine[7]["host"], mine[7]["fee"]) == (1_600_000, 400_000)
-    assert (mine[12]["renter"], mine[12]["refunded"]) == (str(renter.pubkey()), 1_000_000)
+    j = m.job(j1)
+    assert (mine[3]["commit_deadline"], mine[3]["reveal_deadline"]) == (j.commit_deadline,
+                                                                        j.reveal_deadline)
+    assert mine[5]["logits_hash"] == "11" * 32 and mine[5]["checkpoints"] == 3
+    assert mine[5]["answer"] == 1 and mine[5]["fingerprint"] == m.job(j1).fingerprint.hex()
+    assert mine[6]["verifier"] == str(verifier.pubkey())
+    assert (mine[8]["host"], mine[8]["fee"]) == (1_600_000, 400_000)
+    assert (mine[16]["renter"], mine[16]["refunded"]) == (str(renter.pubkey()), 1_000_000)
+    assert (mine[17]["job"], mine[17]["refunded"]) == (str(j4), 500_000)
     gone = [e for e in evs if e.get("provider") == str(leaver.pubkey())]
     assert [e["name"] for e in gone] == ["ProviderRegistered", "Staked", "UnstakeRequested",
                                          "Unstaked"]
