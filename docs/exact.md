@@ -148,46 +148,53 @@ runs the demo against it.
 
 | Account | Seeds | Holds |
 |:--|:--|:--|
-| `Config` | `config, admin` | the mint (USDC), the treasury, the vault, 80/20 and 50/50 in bps, the windows (slots), the minimum stake, the unstake cooldown |
-| vault | `vault, config` | one token account for every escrow and every stake; its authority is the config |
+| `Config` | `config, admin` | the mint (USDC), the treasury, the vault, 80/20 and 50/50 in bps, the windows (slots), the minimum stake, the unstake cooldown, the challenge bond, the arbiter key and its ruling window, the penalty for a withheld reveal |
+| vault | `vault, config` | one token account for every escrow, stake and bond; its authority is the config |
 | `Provider` | `provider, config, owner` | the stake, open jobs, a pending unstake |
-| `Job` | `job, config, renter, job id` | the job digest, the expected model hash, the price, the state, the deadlines, the commitment, the revealed fingerprint and trace root, the challenger |
+| `Job` | `job, config, renter, job id` | the job digest, the expected model hash, the price, the state, the deadlines, the commitment, the revealed fingerprint, answer and trace root, the challenger, its bond and the ruling deadline |
 
 A market is a config, seeded by its admin's key, so anyone can run one (the demo makes its own
-test USDC mint). The admin is also the **arbiter**: it signs `slash` (or `dismiss`) after the
-off-chain bisection names the faulty step, which goes into the `Slashed` event. Replacing the
-arbiter by an on-chain bisection game is TODO.md item 6.
+test USDC mint). The **arbiter** signs `slash` (or `dismiss`) after the off-chain bisection
+names the faulty step, which goes into the `Slashed` event. It is a key of its own in the
+config (the admin's by default), which the admin rotates with `set_arbiter`, so it can be a
+multisig and a stolen admin key does not rule on disputes; the arbiter cannot challenge a job
+itself. It has `arbiter_window` slots from a challenge to rule; after that anyone may dismiss
+and the receipt stands. Replacing the arbiter by an on-chain bisection game is TODO.md item 6.
 
-`initialize` refuses a market with a zero commit window, a zero challenge window or a zero
-minimum stake. The reveal window reuses the commit window's length: `reveal_deadline =
-commit_deadline + commit_window`.
+`initialize` refuses a market with a zero window, stake or bond, and one whose unstake
+cooldown does not outlast a job (commit, reveal, challenge and ruling windows together), so a
+provider cannot leave before a challenge against it is ruled. The reveal window reuses the
+commit window's length: `reveal_deadline = commit_deadline + commit_window`.
 
 | Instruction | Who | When |
 |:--|:--|:--|
+| `set_arbiter` | the admin | any time |
 | `register_provider`, `stake`, `request_unstake`, `unstake` | provider | unstake after the cooldown and with no open jobs |
-| `open_job` | renter | the provider is staked and not leaving; the price (above 0: an open job locks the provider's stake) moves into the vault |
+| `open_job` | renter | the provider is staked and not leaving; the price (above 0) moves into the vault; an optional absolute commit deadline lets one job fanned out to several providers share it |
 | `commit_receipt` | the job's provider | until `commit_deadline` |
-| `reveal_receipt` | the job's provider | after `commit_deadline`, until `reveal_deadline`; opens the commitment, model hash must be the job's |
-| `challenge` | anyone but the provider | until `challenge_deadline`, with another fingerprint; once per job (a dismissed challenge is not raised again) |
+| `reveal_receipt` | the job's provider, with at least the minimum stake | after `commit_deadline`, until `reveal_deadline`; opens the commitment, and checks on-chain that the fingerprint is `H(job digest, model hash, answer, logits hash, trace root)` and the trace root is `H(2, count, tree root)`, so the answer, the logits and the checkpoint count are bound |
+| `challenge` | anyone but the provider and the arbiter, posting `challenge_bond` | until `challenge_deadline`, with another fingerprint; a dismissed challenge does not close the window for other verifiers |
 | `settle` | anyone | revealed, unchallenged, after `challenge_deadline` |
-| `slash`, `dismiss` | the arbiter | challenged; `slash` names a checkpoint index of the posted trace (at most its count) |
-| `expire` | anyone | no reveal by `reveal_deadline`: the escrow goes back to the renter |
+| `slash` | the arbiter | challenged, before the ruling deadline; names a checkpoint index of the posted trace (at most its count); the bond goes back to the verifier with its share |
+| `dismiss` | the arbiter, or anyone after the ruling deadline | challenged; the bond goes to the provider |
+| `expire` | anyone | no reveal by `reveal_deadline`: the escrow goes back to the renter, plus `non_reveal_penalty` from the stake when the provider committed and withheld its reveal |
+| `close_job` | anyone | a finished job (settled, slashed, expired): its rent goes back to the renter |
 
-Tests: `cargo test -p tdcc_exact` (the settlement vectors, the commitment vector) and
-`tests/test_chain.py` on `solana-test-validator` (honest settle, slash, a copied commitment,
-an early reveal, a wrong model hash, a wrong signer, expiry, double settle, a dismissed
-challenge and raising it again, a free job, a ruling past the trace, unstaking through its
-cooldown, a market without windows or stake, a late challenge, a committed job that expires,
-a foreign treasury; each checks the program's error code, and the unstake and expiry tests read
-the events back from the transaction logs). CI runs both.
+Every payout checks that the token account belongs to the party it pays and holds the market's
+mint.
 
-Every state change emits an event: `Initialized`, `ProviderRegistered`, `Staked`,
-`UnstakeRequested`, `Unstaked`, `JobOpened`, `ReceiptCommitted`, `ReceiptRevealed`,
-`Challenged`, `Dismissed`, `Slashed`, `Settled`, `Expired`.
+Tests: `cargo test -p tdcc_exact` (the settlement vectors, the commitment and fingerprint
+vectors) and `tests/test_chain.py` on `solana-test-validator`, one test or more per rule above,
+each checking the program's error code; the unstake, expiry and closing tests read the events
+back from the transaction logs. CI runs both.
 
-Not yet: a challenge bond, verifier selection, the on-chain bisection (TODO.md items 6, 7),
-and a deadline for the arbiter: a challenged job waits for `slash` or `dismiss`, with its
-escrow and its provider's stake held until then.
+Every state change emits an event: `Initialized`, `ArbiterChanged`, `ProviderRegistered`,
+`Staked`, `UnstakeRequested`, `Unstaked`, `JobOpened`, `ReceiptCommitted`, `ReceiptRevealed`
+(with the answer), `Challenged`, `Dismissed`, `Slashed`, `Settled`, `Expired`, `JobClosed`.
+
+Not yet: verifier selection and the on-chain bisection (TODO.md items 6, 7). A renter can open
+a job for any staked provider without its consent; the provider's stake is held until the job
+expires.
 
 ## 7. Overhead of the log
 
