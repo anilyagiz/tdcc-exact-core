@@ -4,6 +4,10 @@ The terms used in [exact.md](exact.md), [architecture.md](architecture.md),
 [threat-model.md](threat-model.md) and [operations.md](operations.md), in alphabetical order.
 `H` is SHA-256 throughout.
 
+**Accept deadline.** The last slot at which a job's provider can `accept_job` an offered job:
+`commit_window` slots after `open_job`, or the renter's absolute commit deadline. After it the
+renter can `cancel_job`.
+
 **Arbiter.** The key that decides a challenge by signing `slash` or `dismiss`, before the
 job's ruling deadline. It is set in the market's config (the admin's key unless given), the
 admin replaces it with `set_arbiter`, and it may not challenge. Today it decides after an
@@ -47,8 +51,9 @@ RAM and its scales, the registers, the pc).
 posts the fingerprint and the salt, and the program checks they open the commitment. It stops
 a provider from copying another's fingerprint.
 
-**Commit window.** The number of slots after `open_job` during which the provider can commit.
-The reveal window that follows has the same length.
+**Commit window.** The number of slots after `accept_job` during which the provider can
+commit (unless the renter fixed an absolute commit deadline). The reveal window that follows
+has the same length, and an offer lapses after the same number of slots.
 
 **Config.** The account that is one market: its admin, its mint, its treasury, its vault, its
 shares and its windows. Its address is derived from the admin's key.
@@ -61,8 +66,8 @@ as the bisection finds it. `slash` records it, and the program checks it is with
 checkpoint count.
 
 **Escrow.** A job's price, held in the market's vault from `open_job` until the job is
-settled (to the provider and the treasury), slashed (back to the renter) or expired (back to
-the renter).
+settled (to the provider and the treasury), slashed (back to the renter), expired or
+cancelled (back to the renter).
 
 **Expire.** Returning a job's escrow to the renter when the provider has not revealed by the
 reveal deadline. Anyone can send it.
@@ -74,8 +79,14 @@ is a different instruction; a `state` fault is the same instruction with a diffe
 `H(job digest || model image hash || answer || logits hash || trace root)`. Two honest runs of
 a job give the same fingerprint on any machine.
 
+**Generate job.** A job of kind `generate`: up to `max_tokens` tokens decoded greedily after
+the prompt, stopping at a token in `stop_ids`. Its answer in the fingerprint is `"GEN"` and
+each token id as a little-endian u32. Off-chain only for now.
+
 **Job digest.** The hash of a job's description: the model's name, the prompt's token ids,
-the Yes and No tokens, the weight format, the KV cache size and the prefill chunk. The `Job`
+the Yes and No tokens, the weight format, the KV cache size, the prefill chunk, the
+checkpoint interval (`every`) and the nonce (for a generate job also its kind, `max_tokens`
+and `stop_ids`). The `Job`
 account stores it; the job JSON itself stays off-chain.
 
 **Leaf.** One checkpoint's entry in the trace's Merkle tree: `H(step || chain || state)`.
@@ -94,8 +105,11 @@ renter out of its stake when the job expires.
 **Nonce.** A random 32-byte value in every job, part of its digest, so no two jobs share a
 digest.
 
-**Open job.** A job that is not yet `Settled`, `Slashed` or `Expired`. A provider with open
-jobs cannot unstake.
+**Offer.** A job in state `Offered`: opened by the renter, not yet accepted by its provider.
+It holds the renter's escrow but none of the provider's stake.
+
+**Open job.** A job its provider accepted that is not yet `Settled`, `Slashed` or `Expired`.
+A provider with open jobs cannot unstake.
 
 **Oracle job.** A yes/no question run on a model: the answer is whichever of the Yes and No
 tokens gets the larger logit after the prompt.
