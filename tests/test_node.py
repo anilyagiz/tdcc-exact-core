@@ -370,3 +370,144 @@ def test_nodes_on_a_validator(tmp_path, job):
     assert m.job(ja).state == "Revealed"
     assert v.run_once() == {}
     srv.shutdown()
+
+
+# ------------------------------------------------------------------------------- the arbiter
+class ArbChain(FakeChain):
+    """FakeChain plus what the arbiter reads and sends, with the program's rules for them."""
+
+    def __init__(self, arbiter, window=20):
+        super().__init__()
+        self.arbiter_key, self.window, self.events = arbiter, window, {}
+
+    def arbiter(self):
+        return self.arbiter_key
+
+    def reveal(self, owner, key, fp, salt, model_hash, answer, logits_hash, tree, cps):
+        sig = super().reveal(owner, key, fp, salt, model_hash, answer, logits_hash, tree, cps)
+        self.events[key] = {"name": "ReceiptRevealed", "job": str(key),
+                            "answer": int(answer == "YES"), "logits_hash": logits_hash.hex()}
+        return sig
+
+    def revealed(self, key):
+        return self.events.get(key)
+
+    def challenge(self, verifier, key, fp):
+        sig = super().challenge(verifier, key, fp)
+        j = self.jobs_[key]
+        j.verifier, j.verifier_fingerprint = verifier.pubkey(), fp
+        j.challenge_slot, j.ruling_deadline = self.now, self.now + self.window
+        return sig
+
+    def slash(self, arbiter, key, index, step):
+        j = self.jobs_[key]
+        assert arbiter.pubkey() == self.arbiter_key and j.state == "Challenged"
+        assert self.now <= j.ruling_deadline and 0 <= index <= j.checkpoints
+        j.state, j.ruling = "Slashed", (index, step)
+        self.sent.append(("slash", key))
+        return f"sig-slash-{len(self.sent)}"
+
+    def dismiss(self, caller, key):
+        j = self.jobs_[key]
+        assert j.state == "Challenged"
+        assert caller.pubkey() == self.arbiter_key or self.now > j.ruling_deadline
+        j.state = "Revealed"
+        self.sent.append(("dismiss", key))
+        return f"sig-dismiss-{len(self.sent)}"
+
+
+@pytest.fixture
+def arb(fake):
+    from solders.keypair import Keypair
+    k = Keypair()
+    fake["arbiter"], fake["chain"] = k, ArbChain(k.pubkey())
+    return fake
+
+
+def _arbiter(f, **kw):
+    from tdcc_exact.node.arbiter import ArbiterNode
+    return ArbiterNode(f["chain"], f["arbiter"], f["store"], f["dir"] / "arb" / "state.json",
+                       f["models"], log=lambda *a: None, **kw)
+
+
+def _revealed(f, job, key=J1, **kw):
+    f["store"].put_job(job)
+    f["chain"].open(key, f["provider"].pubkey(), job.digest, f["model_hash"])
+    assert _provider(f, **kw).run_once(wait=True) == {str(key): "published"}
+    return f["chain"].jobs_[key]
+
+
+def test_arbiter_slashes_a_skipped_layer_at_the_divergence(arb, job):
+    f, c = arb, arb["chain"]
+    _revealed(f, job, skip_layer=1)
+    assert _verifier(f).run_once() == {"J1": "challenged"}
+    a = _arbiter(f)
+    assert a.run_once() == {"J1": "slashed"}
+    s = a.state.get("J1")
+    j = c.jobs_[J1]
+    assert j.state == "Slashed" and j.ruling == (s["divergence_index"], s["fault_step"])
+    assert 0 <= s["divergence_index"] <= j.checkpoints and s["fault_step"] >= 1
+    assert "differs" in s["why"]
+    assert _arbiter(f).run_once() == {}                    # a restart rules once
+
+
+def test_arbiter_dismisses_a_wrong_challenge(arb, job):
+    f, c = arb, arb["chain"]
+    j = _revealed(f, job)
+    c.challenge(f["verifier"], J1, bytes([7]) * 32)        # a verifier with a fake fingerprint
+    a = _arbiter(f)
+    assert a.run_once() == {"J1": "dismissed"}
+    assert j.state == "Revealed" and a.state.get("J1")["rerun"] == j.fingerprint.hex()
+    assert a.run_once() == {}
+    c.now += 1                                             # challenged again: a new ruling
+    c.challenge(f["verifier"], J1, bytes([8]) * 32)
+    assert a.run_once() == {"J1": "dismissed"}
+
+
+def test_arbiter_slashes_an_output_fault(arb, job):
+    """The trace is honest, the receipt's answer is not the one it gives."""
+    from tdcc_exact.chain import receipt_fingerprint
+    f, c = arb, arb["chain"]
+    j = _revealed(f, job)
+    e = c.events[J1]
+    e["answer"] ^= 1                                       # what a lying reveal would post
+    j.fingerprint = receipt_fingerprint(j.job_digest, j.model_hash, e["answer"],
+                                        bytes.fromhex(e["logits_hash"]), j.trace_root)
+    c.challenge(f["verifier"], J1, bytes([7]) * 32)
+    a = _arbiter(f)
+    assert a.run_once() == {"J1": "slashed"}
+    s = a.state.get("J1")
+    assert s["divergence_index"] == j.checkpoints and "answer" in s["why"]
+
+
+def test_arbiter_missing_trace(arb, job):
+    f, c = arb, arb["chain"]
+    j = _revealed(f, job)
+    (f["dir"] / "store" / "traces" / f"{j.trace_root.hex()}.json").unlink()
+    c.challenge(f["verifier"], J1, bytes([7]) * 32)
+    assert _arbiter(f).run_once() == {}                    # within the default grace: wait
+    assert c.sent[-1][0] == "challenge"
+    lenient = _arbiter(f, trace_grace=0, missing_trace_loses=False)
+    assert lenient.run_once() == {"J1": "no-trace"} and j.state == "Challenged"
+    (f["dir"] / "arb" / "state.json").unlink()
+    a = _arbiter(f, trace_grace=0)
+    assert a.run_once() == {"J1": "slashed"}
+    s = a.state.get("J1")
+    assert s["divergence_index"] == 0 and s["trace"] == "missing" and j.state == "Slashed"
+
+
+def test_arbiter_dismisses_after_the_ruling_deadline(arb, job):
+    f, c = arb, arb["chain"]
+    j = _revealed(f, job, skip_layer=1)
+    c.challenge(f["verifier"], J1, bytes([7]) * 32)
+    c.now = j.ruling_deadline + 1
+    assert _arbiter(f, dismiss_late=False).run_once() == {}
+    assert _arbiter(f).run_once() == {"J1": "dismissed-late"} and j.state == "Revealed"
+
+
+def test_arbiter_refuses_another_key(arb):
+    from solders.keypair import Keypair
+
+    from tdcc_exact.node.arbiter import ArbiterNode, NotArbiter
+    with pytest.raises(NotArbiter):
+        ArbiterNode(arb["chain"], Keypair(), arb["store"], arb["dir"] / "x.json")
