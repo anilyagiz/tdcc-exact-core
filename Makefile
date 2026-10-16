@@ -81,3 +81,10 @@ exact-check:
 	$(PYTHON) -m pytest -q tests/test_exact.py tests/test_api.py
 	cargo fmt --all --check
 	cargo clippy -p tdcc_exact --all-targets -- -D warnings
+
+# TDCC Exact's trace engine in RTL (docs/exact-rtl.md): Verilator lint, then the testbenches
+# against tdcc_exact/trace.py (Verilator, or Icarus with EXACT_RTL_SIM=iverilog)
+.PHONY: exact-rtl
+exact-rtl:
+	verilator --lint-only -Wall --top-module exact_trace rtl/exact/exact_sha256.sv rtl/exact/exact_trace.sv
+	$(PYTHON) -m pytest -q tests/test_exact_rtl.py
