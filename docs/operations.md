@@ -1,7 +1,8 @@
 # TDCC Exact: operations
 
 How to run a TDCC Exact market today: deploy the program, initialize a market and choose its
-parameters, keep its keys, watch it, and what has to be done before it holds real money. The
+parameters, keep its keys, run its services, watch it, and what has to be done before it holds
+real money. The
 accounts and the job's states are in [architecture.md](architecture.md); the risks behind
 each recommendation are in [threat-model.md](threat-model.md).
 
@@ -106,7 +107,9 @@ model.
 
 - **`commit_window`**: long enough for a provider to see the job, run it and land the commit:
   the run time of the slowest model the market takes on the slowest hardware it allows, plus
-  margin for congestion. The reveal window (`reveal_deadline = commit_deadline +
+  margin for congestion. It is also the accept window: an offer lapses `commit_window` slots
+  after `open_job` (or at the renter's absolute commit deadline), and the commit window
+  counts from the acceptance. The reveal window (`reveal_deadline = commit_deadline +
   commit_window`) only has to land one transaction, so it is longer than it needs to be.
 - **`challenge_window`**: long enough for a verifier to notice the reveal, re-run the job and
   land a challenge. A verifier on the simulator takes about a minute per LFM2.5-230M job
@@ -159,6 +162,72 @@ readable by its owner only. Do not point `TDCC_EXACT_KEYS` inside the repository
 The admin key also pays rent for the config and the vault, and the demo uses it to fund the
 other roles with SOL. On devnet it needs about 1 SOL; keep its balance watched.
 
+## Running the services
+
+The off-chain services are `tdcc-exact node <role>`
+([`tdcc_exact/node/`](../tdcc_exact/node)); `tdcc-exact node --help` lists every option. Each
+chain-facing node takes `--rpc URL` and `--keys DIR`, a directory of Solana keypair files: its
+own (`<name>.json`, the role by default, `--name` to pick another, created on first use) and
+`admin.json` unless `--admin` gives the market admin's public key. `--once` runs one pass;
+otherwise a node polls every `--poll` seconds (2). The dispute protocol between the nodes is in
+the docstring of [`tdcc_exact/node/__init__.py`](../tdcc_exact/node/__init__.py).
+
+```sh
+tdcc-exact node store    --dir ~/tdcc-store --host 0.0.0.0 --port 8787 --retention 30d
+tdcc-exact node publish  --job job.json --store http://host:8787        # a renter
+tdcc-exact node provider --rpc URL --keys DIR --store http://host:8787
+tdcc-exact node verifier --rpc URL --keys DIR --store http://host:8787 --rate 0.2
+tdcc-exact node arbiter  --rpc URL --keys DIR --store http://host:8787
+tdcc-exact node settler  --rpc URL --keys DIR [--name renter] [--no-close]
+```
+
+### The store
+
+The store holds jobs under their digest, traces under their root and signed notes under a key
+only their signer can fill; it checks every PUT, and every client checks every GET, so a store
+cannot serve a wrong blob, only lose one. Its options:
+
+| Option | Default | What it does |
+|:--|:--|:--|
+| `--dir` | `tdcc-store` | where the blobs go (`jobs/`, `traces/`, `signed/`); writes are atomic |
+| `--host`, `--port` | `127.0.0.1`, 8787 | the address to listen on |
+| `--max-body KIND=BYTES` | job 1 MiB, trace 64 MiB, signed 4 MiB | the largest PUT of a kind (repeatable); a larger one gets 413 before its body is read |
+| `--timeout` | 30 s | how long a client may stall a request before it is dropped |
+| `--max-clients` | 64 | connections served at once; more get 503 |
+| `--writers FILE` | anyone | take PUTs only when signed by a key in FILE (hex or base58, one per line, re-read when it changes); clients sign with `--store-key` |
+| `--retention` | keep everything | delete blobs last stored longer ago than this (`90s`, `12h`, `30d`, `2w`); storing a blob again refreshes it |
+| `--pins FILE` | none | keys (hex, one per line) never deleted; re-read each gc pass |
+| `--gc-every` | 1 h | time between gc passes (one also runs at start) |
+| `--mirror URL` | none | push every newly accepted blob to another store (repeatable, retried with backoff; signed with `--store-key` if given) |
+
+`tdcc-exact node gc --dir DIR --retention 30d [--pins FILE] [--dry-run]` runs one pass by
+hand. Set the retention to at least a job's whole life (the accept, commit, reveal, challenge
+and ruling windows), or pin the traces of disputed jobs: a provider's trace or revealed window
+gone before the arbiter rules loses the provider the dispute.
+
+The other nodes take `--store` as a URL or a directory, or several, comma-separated: a write
+must reach `--quorum` of them (default a majority) and a read takes the first good copy.
+
+### The nodes
+
+- **Provider.** Accepts only the offers it has checked (the job fetched under its on-chain
+  digest, the model hash the registry's pin), runs them, commits, reveals, publishes its trace
+  and, when challenged, its disputed window. Its salts and progress are in `--state` (default
+  `KEYS/<name>.state/state.json`): back it up, a lost salt is a reveal that cannot be made.
+- **Verifier.** Re-runs a share of the revealed jobs (`--rate`, default 1.0), picked by a hash
+  of the job and its secret key, and challenges a mismatch (it needs USDC for the bond).
+- **Arbiter.** Signs with `KEYS/arbiter.json` (or `admin.json`), which must be the market's
+  arbiter. `--missing-trace-waits` and `--missing-window-waits` stop it from slashing a
+  provider whose trace or window is missing; `--trace-grace` and `--window-grace` set how many
+  slots it waits for them (default half the ruling window).
+- **Settler.** Holds no state and needs no store; any key with SOL for the fees can run it.
+  Each pass it settles Revealed jobs past their challenge deadline, expires Open and Committed
+  jobs past their reveal deadline, and closes finished jobs (`--no-close` leaves them open),
+  the rent back to the renter. A lapsed offer can be cancelled only by its renter, so a
+  settler cancels only the offers of its own key: a renter runs one with `--name <renter>`
+  (and the others are logged once and skipped). A transaction another settler sent first
+  fails, is logged, and the job is done on the next pass.
+
 ## Monitoring
 
 Every state change emits an Anchor event, as a `Program data: ` line in the transaction's
@@ -173,7 +242,9 @@ them live.
 | `Staked` | provider, amount, stake | |
 | `UnstakeRequested` | provider, unlock_slot | a provider leaving with open jobs |
 | `Unstaked` | provider, amount | |
-| `JobOpened` | job, renter, provider, price, job_digest | many cheap jobs against one provider (stake locking) |
+| `JobOpened` | job, renter, provider, price, job_digest | an offer: the provider has until its accept deadline |
+| `JobAccepted` | job, provider, commit_deadline, reveal_deadline | |
+| `JobCancelled` | job, renter, refunded | providers that let offers lapse |
 | `ReceiptCommitted` | job, commitment | |
 | `ReceiptRevealed` | job, fingerprint, trace_root, checkpoints, answer, logits_hash | verifiers should re-run each one before its challenge deadline |
 | `Challenged` | job, verifier, fingerprint, bond, ruling_deadline | every one: the arbiter has to rule before the deadline |
@@ -192,6 +263,8 @@ Checks to run on a schedule:
   operator should run a settler so providers are paid without asking.
 - **Open or committed jobs past their reveal deadline** and not expired. Anyone can expire;
   the same settler can.
+- **Offered jobs past their accept deadline.** Only the renter can cancel them (a settler run
+  under its key does); until then the escrow stays in the vault.
 - **The vault's balance** is at least the sum of the providers' stakes and the prices of open
   jobs. A shortfall is a bug; a surplus is a transfer into the vault from outside the program.
 - **The program's last deploy slot and upgrade authority** (`solana program show`): any
