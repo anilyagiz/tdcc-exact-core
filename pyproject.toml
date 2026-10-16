@@ -53,7 +53,7 @@ otpu-memcal = "opentpu.host.memcal:main"
 include = ["opentpu*", "tdcc_exact*"]
 
 [tool.setuptools.package-data]
-tdcc_exact = ["models.json", "py.typed"]
+tdcc_exact = ["models.json", "py.typed", "explorer/static/*"]
 opentpu = ["lens_app.html", "host/setup_pcie.sh", "host/pcie/*", "host/litedram/*"]
 
 # Lint for TDCC Exact's own Python only (upstream openTPU code is not linted here): the rule set
@@ -72,6 +72,7 @@ include = [
     "tests/test_api.py",
     "tests/test_node.py",
     "tests/test_indexer.py",
+    "tests/test_explorer.py",
 ]
 
 [tool.ruff.lint]

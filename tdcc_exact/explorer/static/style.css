@@ -34,7 +34,7 @@ a { color: var(--accent); }
 .status { min-height: 1.4em; margin: 4px auto; color: var(--muted); font-size: .9rem; }
 .status.error { color: var(--bad-fg); }
 .tiles {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); gap: 8px; margin: 0;
 }
 .tiles div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 .tiles dt { color: var(--muted); font-size: .8rem; }
@@ -67,9 +67,11 @@ footer { color: var(--muted); font-size: .8rem; margin-top: 24px; }
   table, tbody, tr, td { display: block; width: 100%; }
   thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   tbody tr { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; padding: 4px 0; }
-  td { border: 0; padding: 4px 12px; display: grid; grid-template-columns: 7.5em 1fr; gap: 8px; overflow-wrap: anywhere; }
+  /* the label sits in a left gutter, so a cell's several lines stay together on the right */
+  td { border: 0; padding: 4px 12px 4px calc(7.5em + 20px); position: relative; overflow-wrap: anywhere; min-width: 0; }
   td.num { text-align: left; }
-  td::before { content: attr(data-label); color: var(--muted); font-size: .78rem; }
+  td::before { content: attr(data-label); color: var(--muted); font-size: .78rem;
+               position: absolute; left: 12px; top: 6px; width: 7.5em; }
   td.empty { display: block; }
   td.empty::before { content: none; }
 }
