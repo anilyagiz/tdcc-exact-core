@@ -790,3 +790,157 @@ def test_arbiter_on_a_validator(tmp_path, job):
     assert sw["revealed"] == "missing" and sw["fault_step"] == d.lo + 1
     assert main(cmd) == 0                       # nothing left to rule on
     srv.shutdown()
+
+
+# ------------------------------------------------------------------------------- the settler
+class SettleChain(FakeChain):
+    """FakeChain plus what the settler sends, with the program's rules for them."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail = set()                       # actions another settler got to first
+
+    def add(self, key, state, renter, **deadlines):
+        from types import SimpleNamespace
+        j = {"accept_deadline": 0, "reveal_deadline": 0, "challenge_deadline": 0, **deadlines}
+        self.jobs_[key] = SimpleNamespace(state=state, renter=renter, provider=None,
+                                          opened_slot=0, **j)
+
+    def _act(self, name, key, states, deadline, then):
+        if (name, key) in self.fail:
+            raise RuntimeError("WrongState")
+        j = self.jobs_[key]
+        assert j.state in states and (deadline is None or self.now > getattr(j, deadline))
+        if then is None:
+            del self.jobs_[key]
+        else:
+            j.state = then
+        self.sent.append((name, key))
+        return f"sig-{name}-{len(self.sent)}"
+
+    def settle(self, payer, key):
+        return self._act("settle", key, ("Revealed",), "challenge_deadline", "Settled")
+
+    def expire(self, payer, key):
+        return self._act("expire", key, ("Open", "Committed"), "reveal_deadline", "Expired")
+
+    def cancel(self, renter, key):
+        assert bytes(renter.pubkey()) == bytes(self.jobs_[key].renter)     # NotTheRenter
+        return self._act("cancel", key, ("Offered",), "accept_deadline", "Expired")
+
+    def close(self, caller, key):
+        return self._act("close", key, ("Settled", "Slashed", "Expired"), None, None)
+
+
+def test_settler_moves_every_job_past_its_deadline(fake):
+    from solders.keypair import Keypair
+
+    from tdcc_exact.node.settler import SettlerNode
+    c, me, logs = SettleChain(), Keypair(), []
+    other = Keypair().pubkey()
+    c.add(Key("rev-due"), "Revealed", other, challenge_deadline=99)
+    c.add(Key("rev-wait"), "Revealed", other, challenge_deadline=100)     # == now: still open
+    c.add(Key("open-due"), "Open", other, reveal_deadline=50)
+    c.add(Key("com-due"), "Committed", other, reveal_deadline=99)
+    c.add(Key("com-wait"), "Committed", other, reveal_deadline=120)
+    c.add(Key("chal"), "Challenged", other, challenge_deadline=10)        # the arbiter's
+    c.add(Key("off-mine"), "Offered", me.pubkey(), accept_deadline=90)
+    c.add(Key("off-theirs"), "Offered", other, accept_deadline=90)
+    c.add(Key("off-wait"), "Offered", me.pubkey(), accept_deadline=100)
+    c.add(Key("slashed"), "Slashed", other)
+    s = SettlerNode(c, me, log=logs.append)
+    assert s.run_once() == {"rev-due": ["settle", "close"], "open-due": ["expire", "close"],
+                            "com-due": ["expire", "close"], "off-mine": ["cancel", "close"],
+                            "slashed": ["close"]}
+    assert sum("off-thei" in x and "skipped" in x for x in logs) == 1
+    assert {str(k): j.state for k, j in c.jobs_.items()} == {
+        "rev-wait": "Revealed", "com-wait": "Committed", "chal": "Challenged",
+        "off-theirs": "Offered", "off-wait": "Offered"}
+    assert s.run_once() == {}
+    assert sum("skipped" in x for x in logs) == 1                       # logged once
+    c.now = 130
+    assert s.run_once() == {"rev-wait": ["settle", "close"], "com-wait": ["expire", "close"],
+                            "off-wait": ["cancel", "close"]}
+    # under someone else's key the renter's lapsed offer stays; close=False keeps accounts
+    c.add(Key("rev2"), "Revealed", other, challenge_deadline=1)
+    c.add(Key("off2"), "Offered", me.pubkey(), accept_deadline=1)
+    assert SettlerNode(c, Keypair(), close=False, log=logs.append).run_once() == {
+        "rev2": ["settle"]}
+    assert c.jobs_[Key("rev2")].state == "Settled" and c.jobs_[Key("off2")].state == "Offered"
+
+
+def test_settler_shrugs_off_a_lost_race(fake):
+    from solders.keypair import Keypair
+
+    from tdcc_exact.node.settler import SettlerNode
+    c, logs = SettleChain(), []
+    c.add(Key("j1"), "Revealed", Keypair().pubkey(), challenge_deadline=1)
+    c.add(Key("j2"), "Open", Keypair().pubkey(), reveal_deadline=1)
+    c.fail.add(("settle", Key("j1")))
+    assert SettlerNode(c, Keypair(), log=logs.append).run_once() == {"j2": ["expire", "close"]}
+    assert any("settle failed" in x for x in logs)
+
+
+@pytest.mark.skipif(not _chain_up(), reason=f"no validator with the program at {URL}")
+def test_settler_on_a_validator(tmp_path):
+    """Jobs left at every deadline: a third party's settler (the CLI) settles, expires and
+    closes them and skips the renter's lapsed offer; the renter's own settler cancels it."""
+    from solders.keypair import Keypair
+
+    from tdcc_exact.chain import Market, Params, Rpc, receipt_fingerprint, trace_root
+    from tdcc_exact.cli import main
+    from tdcc_exact.commit import commitment
+    from tdcc_exact.node.chainio import Chain
+    from tdcc_exact.node.settler import SettlerNode
+
+    rpc = Rpc(URL)
+    admin, renter, prov, treasury, anyone = (Keypair() for _ in range(5))
+    for k in (admin, renter, prov, anyone):
+        rpc.airdrop(k.pubkey(), 2_000_000_000)
+    m = Market(rpc, admin, "localnet")
+    params = Params(commit_window=8, challenge_window=6, arbiter_window=4,
+                    unstake_cooldown=40, non_reveal_penalty=1_000_000)
+    m.initialize(treasury.pubkey(), params)
+    m.mint_to(prov.pubkey(), 20_000_000)
+    m.register_provider(prov)
+    m.stake(prov, 20_000_000)
+    m.mint_to(renter.pubkey(), 10_000_000)
+    model, base = bytes([7]) * 32, int(time.time() * 1000)
+
+    def offer(i, accept=True):
+        job, _ = m.open_job(renter, prov.pubkey(), base + i, bytes([i]) * 32, model, 1_000_000)
+        if accept:
+            m.accept_job(prov, job)
+        return job
+
+    jr, jc, jo, jf = offer(1), offer(2), offer(3), offer(4, accept=False)
+    salts = {}
+    for j in (jr, jc):
+        fp = receipt_fingerprint(m.job(j).job_digest, model, "YES", b"\x11" * 32,
+                                 trace_root(b"\x12" * 32, 3))
+        salts[j] = (fp, os.urandom(32))
+        m.commit_receipt(prov, j, commitment(fp, bytes(prov.pubkey()), salts[j][1]))
+    rpc.wait_slot(m.job(jr).commit_deadline)
+    fp, salt = salts[jr]
+    m.reveal_receipt(prov, jr, fp, salt, model, "YES", b"\x11" * 32, b"\x12" * 32, 3)
+    chain = Chain(m)
+    assert SettlerNode(chain, anyone, log=lambda *x: None).run_once() == {}   # nothing due
+    rpc.wait_slot(max(m.job(jr).challenge_deadline, m.job(jc).reveal_deadline,
+                      m.job(jo).reveal_deadline, m.job(jf).accept_deadline))
+
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    for name, k in (("settler", anyone), ("admin", admin), ("renter", renter)):
+        (keys / f"{name}.json").write_text(json.dumps(list(bytes(k))))
+    p0, r0 = m.balance(prov.pubkey()), m.balance(renter.pubkey())
+    assert main(["node", "settler", "--rpc", URL, "--keys", str(keys), "--once"]) == 0
+    for j in (jr, jc, jo):
+        assert rpc.account(j) is None                   # settled or expired, then closed
+    assert m.job(jf).state == "Offered"                 # only the renter cancels
+    assert m.balance(prov.pubkey()) - p0 == 800_000
+    assert m.balance(renter.pubkey()) - r0 == 2 * 1_000_000 + 1_000_000   # + the penalty
+    assert m.provider(prov.pubkey()).open_jobs == 0
+    assert main(["node", "settler", "--rpc", URL, "--keys", str(keys), "--name", "renter",
+                 "--once"]) == 0
+    assert rpc.account(jf) is None
+    assert m.balance(renter.pubkey()) - r0 == 4 * 1_000_000
