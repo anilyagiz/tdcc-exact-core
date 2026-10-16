@@ -24,6 +24,9 @@ split, all on the bit-exact ISA simulator with a tiny random model (`tdcc-exact 
       `open_job` (USDC SPL transfer into an escrow PDA), `post_receipt`,
       `challenge`, `settle` (after the window: 80% host / 20% TDCC), `slash` (refund the
       renter, half the stake to the verifier, the rest to TDCC).
+- [x] Provider consent: `open_job` only offers a job (`Offered`, no stake locked); the
+      provider takes it on with `accept_job` before its `accept_deadline`, else the renter
+      `cancel_job`s it and gets the escrow back (`JobAccepted`, `JobCancelled`).
 - [x] USDC on devnet: a test mint the demo creates (6 decimals), per market.
 - [x] Program tests (tests/test_chain.py on solana-test-validator): honest settle, slash, window expiry,
       double settle, wrong signer.
@@ -120,7 +123,9 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
       Random audits funded from the 20% fee, or deliberately planted faulty jobs with a
       reward for catching them.
 - [ ] Verifier selection: random (VRF / slot hash), so a provider cannot collude with "its"
-      verifier.
+      verifier. Done in part: the verifier node samples by a hash of the job and its secret
+      key, so no provider can compute which of its jobs go unchecked
+      (docs/design/verifier-incentives.md has the rest).
 - [x] Rate limits on challenges: a challenge bond, lost when the challenge is wrong.
 - [x] A deadline for the arbiter: a challenged job holds its escrow and its provider's stake
       until `slash` or `dismiss`; after the deadline anyone could dismiss. Needs a new field
@@ -131,7 +136,8 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
 ### 8. Services
 - [x] Provider node daemon: watches the chain for jobs, runs them on the card or the
       simulator, posts receipts, serves reveals, keeps traces for the challenge window.
-      (`tdcc-exact node provider`; serving reveal windows is still open, item 6.)
+      (`tdcc-exact node provider`; it accepts only the offers it has checked, and reveals
+      its disputed window through the store, item 6.)
 - [x] Verifier node: samples jobs, re-runs on a laptop, challenges, runs the bisection.
       (`tdcc-exact node verifier`; the bisection stays with the arbiter for now.)
 - [x] An indexer: the program's events and accounts as a market snapshot
@@ -141,18 +147,24 @@ shortcut it took (`--replay-skip-layer`). In a market the provider must reveal i
       provider's revealed window.)
 - [ ] Renter API: "one API, like any GPU platform": HTTP endpoint that opens a job and
       returns the answer; payment per token in USDC from a wallet or over HTTP with x402.
+- [x] A settler: settles, expires, closes finished jobs, and cancels the lapsed offers of
+      its own key (a renter's). (`tdcc-exact node settler`, tdcc_exact/node/settler.py.)
 - [x] More cheat scenarios in tests: a smaller model substituted, fp4 instead of int8,
       tokens skipped, an answer with no run at all, a receipt copied (see 4).
-- [ ] Jobs beyond yes/no: generate N tokens (greedy only: sampling uses the host's RNG,
-      which would have to be seeded from the job and committed).
+- [x] Jobs beyond yes/no: generate N tokens (greedy only: sampling uses the host's RNG,
+      which would have to be seeded from the job and committed). (`job new --kind generate`,
+      tests/test_generate.py; verified and disputed off-chain. Open: the program's reveal
+      takes a YES / NO answer, so generate jobs cannot go on-chain yet.)
 
 ### 9. Performance of the verifier
 - [x] The trace log hashes every instruction in Python (`TraceLog.observe`). Measure on
       LFM2.5-230M; if it dominates, batch the chain per run or move the hashing into a C /
       Rust extension. (It does not: +14% on LFM2.5-230M, docs/exact.md section 7; about 5%
       of a tiny-model run under the profiler, the rest is the simulator.)
-- [ ] Checkpoint interval (`EVERY = 4096`): trade-off between trace size and the window a
-      dispute replays. Pick it from the measurements.
+- [x] Checkpoint interval (`EVERY = 4096`): trade-off between trace size and the window a
+      dispute replays. Pick it from the measurements. (tools/checkpoint_bench.py,
+      docs/exact.md section 7: keep 4096; the interval is part of the job's digest, so a
+      market can pick another per job. The LFM2.5-230M rows are still to be measured.)
 
 ---
 
@@ -164,9 +176,13 @@ it), but the Exact trace log exists only in the simulator. On the card the provi
 have to re-run the job on the simulator to produce a trace, which defeats the card's speed.
 - [ ] RTL: a hash engine next to the sequencer (`rtl/seq/otpu_seq.sv`) that folds each
       issued instruction and the register file into a running chain (BLAKE2s or SHA-256 in
-      fabric), readable over the control registers.
+      fabric), readable over the control registers. Done in part: the engine (`rtl/exact/`,
+      docs/exact-rtl.md, `make exact-rtl`) gives `TraceLog`'s chain bit for bit in RTL
+      simulation (tests/test_exact_rtl.py). Open: the hook in `otpu_seq`, its registers in
+      `otpu_ctrl`, and a whole-core test against the ISA simulator.
 - [ ] State checkpoints on the card: a TMEM / ACT RAM read-out (or an incremental hash of
-      every write) at checkpoint boundaries.
+      every write) at checkpoint boundaries. (The RTL engine folds a state hash the host
+      posts; nothing on the card computes it yet.)
 - [ ] The card's chain must equal the simulator's bit for bit: a test like
       `tools/validate.py --backend board --against isa` for the trace root.
 - [ ] Timing: the design closes 133.33 MHz with WNS +0.032 ns (README); a hash engine

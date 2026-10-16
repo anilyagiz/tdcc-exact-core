@@ -14,12 +14,14 @@ Windows):
   to its checkpoint count; Merkle proofs; receipts by commit-reveal with the salt kept private;
   a dispute that bisects to a checkpoint, checks a provider's revealed window against its
   posted checkpoints, and rules output faults; a model registry enforced before a run.
-- **Program** (devnet): escrow, stakes, a challenge bond, a separate rotatable arbiter with a
-  ruling deadline, on-chain checks that the fingerprint and trace root are the hashes of their
-  revealed parts, a penalty for a withheld reveal, a cooldown that outlasts a job, closing of
-  finished jobs, an event for every state change.
-- **Services.** A content-addressed job and trace store, a provider node, a verifier node, an
-  arbiter node, an indexer and a market status command.
+- **Program** (devnet): escrow, stakes, jobs a provider takes on only by accepting them, a
+  challenge bond, a separate rotatable arbiter with a ruling deadline, on-chain checks that
+  the fingerprint and trace root are the hashes of their revealed parts, a penalty for a
+  withheld reveal, a cooldown that outlasts a job, closing of finished jobs, an event for
+  every state change.
+- **Services.** A content-addressed job and trace store, a provider node, a verifier node
+  (sampling by its secret key), an arbiter node, a settler node, an indexer and a market
+  status command.
 - **Project.** A library API, CI and lint, a release workflow, security policy, architecture,
   threat model, glossary and operations docs.
 
@@ -56,8 +58,10 @@ Goal: no key can decide a dispute.
   lose by default (the Merkle proofs it needs exist).
 - Verifier selection by slot hash or VRF, and pay for verifying when nobody cheats (random
   audits from the fee, or planted faulty jobs).
-- A provider's consent to a job (or a per-job stake), so a renter cannot hold any provider's
-  stake with jobs it did not accept.
+- Done: a provider's consent to a job. `open_job` only offers it; the provider's stake is
+  locked once it signs `accept_job`, and a lapsed offer goes back to the renter
+  (`cancel_job`). A per-job stake is still open ("One stake behind many jobs" in
+  [docs/threat-model.md](docs/threat-model.md#attacks)).
 
 Exit: the arbiter key can be set to an unusable address and every dispute test still passes on
 the validator.
@@ -67,7 +71,11 @@ the validator.
 Goal: a provider runs jobs on the FPGA card and its trace root equals the simulator's.
 
 - A hash engine next to the sequencer in RTL, the state checkpoints read out from the card,
-  timing closed with it in (TODO.md item 10).
+  timing closed with it in (TODO.md item 10). Done in part: the engine exists in `rtl/exact/`
+  and gives the Python log's chain bit for bit in RTL simulation
+  ([docs/exact-rtl.md](docs/exact-rtl.md)). Left: wiring it into `otpu_seq` and `otpu_ctrl`,
+  computing the checkpoints' state hash on the card (the host supplies it today), synthesis
+  and timing closure at 133.33 MHz in Vivado, and a whole-core test against the simulator.
 - A test that the card's trace root equals the simulator's on LFM2.5-230M.
 - **owner**: getting the card.
 
