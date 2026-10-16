@@ -94,8 +94,8 @@ The steps the CLI runs for this flow, without the chain, are in the README ("Try
 | `Job` | `"job", config, renter, job_id` (little-endian u64) | the renter, the provider, the job digest, the expected model hash, the price, the state, the opened slot, the commit, reveal and challenge deadlines, the commitment, the revealed fingerprint and trace root, the checkpoint count, the challenger and its fingerprint |
 
 A market is one `Config`. Its seeds are the admin's key, so anyone can start a market, and a
-market's parameters and admin are fixed once it is initialized: the program has no
-instruction that changes them. The program id is
+market's parameters and admin are fixed once it is initialized; the one thing the admin can
+change is the arbiter key (`set_arbiter`). The program id is
 `HzpKeqHLg7Mmjh1JmGymef7Z7hf3JXhaagp6UgTSH24A`.
 
 Deadlines are set as the job moves:
@@ -103,8 +103,12 @@ Deadlines are set as the job moves:
 - `commit_deadline = opened slot + commit_window` (at `open_job`)
 - `reveal_deadline = commit_deadline + commit_window` (at `open_job`; the reveal window reuses
   the commit window's length)
-- `challenge_deadline = reveal slot + challenge_window` (at `reveal_receipt`; `dismiss` sets
-  it to the current slot)
+- `commit_deadline` may instead be given by the renter (an absolute slot), so one job fanned
+  out to several providers shares it
+- `challenge_deadline = reveal slot + challenge_window` (at `reveal_receipt`; a dismissal does
+  not change it, so another verifier may still challenge)
+- `ruling_deadline = challenge slot + arbiter_window` (at `challenge`; after it anyone can
+  dismiss)
 
 ## The state of a job
 
@@ -115,28 +119,30 @@ stateDiagram-v2
     Open --> Expired: expire (anyone, after reveal_deadline)
     Committed --> Revealed: reveal_receipt (provider, after commit_deadline, until reveal_deadline)
     Committed --> Expired: expire (anyone, after reveal_deadline)
-    Revealed --> Challenged: challenge (anyone but the provider, until challenge_deadline, once per job)
+    Revealed --> Challenged: challenge (anyone but the provider and the arbiter, with a bond, until challenge_deadline)
     Revealed --> Settled: settle (anyone, after challenge_deadline)
-    Challenged --> Slashed: slash (arbiter)
-    Challenged --> Revealed: dismiss (arbiter)
-    Settled --> [*]
-    Slashed --> [*]
-    Expired --> [*]
+    Challenged --> Slashed: slash (arbiter, until ruling_deadline)
+    Challenged --> Revealed: dismiss (arbiter, or anyone after ruling_deadline)
+    Settled --> Closed: close_job (anyone)
+    Slashed --> Closed: close_job (anyone)
+    Expired --> Closed: close_job (anyone)
+    Closed --> [*]
 ```
 
 | Transition | Who | Money |
 |:--|:--|:--|
 | `open_job` | the renter; the provider must hold at least `min_stake` and not be leaving; the price must be above 0 | the price moves from the renter into the vault; the provider's open-job count goes up |
 | `commit_receipt` | the job's provider | none |
-| `reveal_receipt` | the job's provider; the reveal must open the commitment and name the job's model hash | none |
-| `challenge` | any key but the provider; a different fingerprint; not after a dismissed challenge | none (no bond yet) |
+| `reveal_receipt` | the job's provider, holding at least `min_stake`; the reveal must open the commitment, name the job's model hash, and its fingerprint and trace root must be the hashes of their revealed parts (answer, logits hash, tree root, count) | none |
+| `challenge` | any key but the provider and the arbiter; a different fingerprint; not the verifier whose challenge was just dismissed | `challenge_bond` from the verifier into the vault |
 | `settle` | anyone | `host_bps` of the price to the provider, the rest to the treasury |
-| `slash` | the arbiter; the divergence index must be within the posted checkpoint count | the price back to the renter; `verifier_bps` of the provider's whole stake to the challenger, the rest to the treasury; the stake drops to 0 |
-| `dismiss` | the arbiter | none; the job can be settled from the next slot |
-| `expire` | anyone | the price back to the renter |
+| `slash` | the arbiter, before the ruling deadline; the divergence index must be within the posted checkpoint count | the price back to the renter; `verifier_bps` of the provider's whole stake and the bond to the challenger, the rest to the treasury; the stake drops to 0 |
+| `dismiss` | the arbiter, or anyone after the ruling deadline | the bond to the provider; the job is Revealed again until its original challenge deadline |
+| `expire` | anyone | the price back to the renter, plus `non_reveal_penalty` from the stake when the provider committed and did not reveal |
+| `close_job` | anyone, on a final job | the job account's rent back to the renter |
 
 `Settled`, `Slashed` and `Expired` are final, and each of them lowers the provider's open-job
-count. A provider can `unstake` only with no open jobs and after `unstake_cooldown` slots
+count; `close_job` then removes the account. A provider can `unstake` only with no open jobs and after `unstake_cooldown` slots
 from its `request_unstake`; staking again cancels a pending unstake.
 
 Every state change emits an event; [operations.md](operations.md#monitoring) lists them.
